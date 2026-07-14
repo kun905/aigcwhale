@@ -82,7 +82,11 @@ export default {
     tableOfContents: 'Contents',
     copyCode: 'Copy',
     copiedCode: 'Copied',
-    copyCodeFailed: 'Failed'
+    copyCodeFailed: 'Failed',
+    launchDesc: 'Click the button below to open in a new window',
+    launchDescSub: 'Enjoy the full, stable experience',
+    launchButton: 'Enter',
+    launchHint: 'Opens {host} in a new tab'
   },
 
   // Announcements Page

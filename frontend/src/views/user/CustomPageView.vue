@@ -93,22 +93,35 @@
           </div>
         </div>
 
-        <!-- Iframe embed mode -->
-        <div v-else class="custom-embed-shell">
-          <a
-            :href="embeddedUrl"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="btn btn-secondary btn-sm custom-open-fab"
-          >
-            <Icon name="externalLink" size="sm" class="mr-1.5" :stroke-width="2" />
-            {{ t('customPage.openInNewTab') }}
-          </a>
-          <iframe
-            :src="embeddedUrl"
-            class="custom-embed-frame"
-            allowfullscreen
-          ></iframe>
+        <!-- External link launch mode: title + button that opens the target in a new tab.
+             Avoids iframe embedding, which browsers may block for cross-site third-party content. -->
+        <div v-else class="custom-launch-shell">
+          <div class="custom-launch-card">
+            <div class="custom-launch-logo">
+              <img
+                :src="siteLogo || '/logo.png'"
+                :alt="siteName"
+                class="h-full w-full object-contain"
+              />
+            </div>
+            <h1 class="custom-launch-title">{{ menuItem?.label }}</h1>
+            <p class="custom-launch-desc">
+              {{ t('customPage.launchDesc') }}<br />
+              {{ t('customPage.launchDescSub') }}
+            </p>
+            <a
+              :href="embeddedUrl"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="btn btn-primary custom-launch-btn"
+            >
+              <Icon name="externalLink" size="sm" class="mr-1.5" :stroke-width="2" />
+              {{ t('customPage.launchButton') }}
+            </a>
+            <p v-if="menuUrlHost" class="custom-launch-hint">
+              {{ t('customPage.launchHint', { host: menuUrlHost }) }}
+            </p>
+          </div>
         </div>
       </div>
     </div>
@@ -188,6 +201,20 @@ const isValidUrl = computed(() => {
   if (isMarkdownMode.value) return false
   const url = embeddedUrl.value
   return url.startsWith('http://') || url.startsWith('https://')
+})
+
+const siteLogo = computed(() => appStore.siteLogo || '')
+const siteName = computed(() => appStore.siteName || '')
+
+// Host shown in the launch hint, parsed from the configured menu URL.
+const menuUrlHost = computed(() => {
+  const raw = menuItem.value?.url
+  if (!raw) return ''
+  try {
+    return new URL(raw).host
+  } catch {
+    return ''
+  }
 })
 
 function generateHeadingId(text: string, index: number): string {
@@ -437,27 +464,35 @@ onUnmounted(() => {
   @apply shadow-sm transition-colors cursor-pointer;
 }
 
-.custom-embed-shell {
-  @apply relative;
-  @apply h-full w-full overflow-hidden rounded-2xl;
+.custom-launch-shell {
+  @apply flex h-full w-full items-center justify-center overflow-hidden rounded-2xl p-6;
   @apply bg-gradient-to-b from-gray-50 to-white dark:from-dark-900 dark:to-dark-950;
-  @apply p-0;
 }
 
-.custom-open-fab {
-  @apply absolute right-3 top-3 z-10;
-  @apply shadow-sm backdrop-blur supports-[backdrop-filter]:bg-white/80 dark:supports-[backdrop-filter]:bg-dark-800/80;
+.custom-launch-card {
+  @apply flex w-full max-w-md flex-col items-center text-center;
 }
 
-.custom-embed-frame {
-  display: block;
-  margin: 0;
-  width: 100%;
-  height: 100%;
-  border: 0;
-  border-radius: 0;
-  box-shadow: none;
-  background: transparent;
+.custom-launch-logo {
+  @apply mb-6 flex h-20 w-20 items-center justify-center overflow-hidden rounded-2xl;
+  @apply bg-white shadow-lg ring-1 ring-black/5 dark:bg-dark-800 dark:ring-white/10;
+  padding: 0.75rem;
+}
+
+.custom-launch-title {
+  @apply text-2xl font-bold text-gray-900 dark:text-white;
+}
+
+.custom-launch-desc {
+  @apply mt-3 text-sm leading-relaxed text-gray-500 dark:text-dark-400;
+}
+
+.custom-launch-btn {
+  @apply mt-7 px-6 py-2.5 text-base font-medium shadow-md;
+}
+
+.custom-launch-hint {
+  @apply mt-4 text-xs text-gray-400 dark:text-dark-500;
 }
 </style>
 
