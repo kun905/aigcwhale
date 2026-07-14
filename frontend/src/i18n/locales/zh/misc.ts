@@ -81,9 +81,9 @@ export default {
     copyCode: '复制',
     copiedCode: '已复制',
     copyCodeFailed: '失败',
-    launchDesc: '点击下方按钮，在新窗口打开生图站',
-    launchDescSub: '享受完整、稳定的生图体验',
-    launchButton: '进入生图站',
+    launchDesc: '点击下方按钮，在新窗口打开页面',
+    launchDescSub: '在新窗口中获得完整、稳定的访问体验',
+    launchButton: '立即前往',
     launchHint: '将在新标签页打开 {host}'
   },
 

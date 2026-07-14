@@ -106,8 +106,7 @@
             </div>
             <h1 class="custom-launch-title">{{ menuItem?.label }}</h1>
             <p class="custom-launch-desc">
-              {{ t('customPage.launchDesc') }}<br />
-              {{ t('customPage.launchDescSub') }}
+              {{ t('customPage.launchDesc') }}
             </p>
             <a
               :href="embeddedUrl"
