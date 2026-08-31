@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
@@ -1793,6 +1794,25 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		flushPending = true
 		flushPendingOutput()
 	}
+	deliverSyntheticFailure := func(message string) {
+		if clientDisconnected || failureDelivered {
+			return
+		}
+		if !writePendingLines() {
+			return
+		}
+		if _, err := fmt.Fprint(w, buildOpenAIResponseFailedSSE(responseID, originalModel, nil, message)); err != nil {
+			clientDisconnected = true
+			return
+		}
+		clientOutputStarted = true
+		sawFailedEvent = true
+		sawResponseFailed = true
+		failedMessage = message
+		failureDelivered = true
+		flushPending = true
+		flushPendingOutput()
+	}
 
 	scanner := bufio.NewScanner(resp.Body)
 	maxLineSize := defaultMaxLineSize
@@ -1812,6 +1832,8 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	}
 	events := make(chan scanEvent, 16)
 	done := make(chan struct{})
+	var lastReadAt int64
+	atomic.StoreInt64(&lastReadAt, time.Now().UnixNano())
 	sendEvent := func(ev scanEvent) bool {
 		select {
 		case events <- ev:
@@ -1824,6 +1846,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		defer putSSEScannerBuf64K(scanBuf)
 		defer close(events)
 		for documentScanner.Scan() {
+			atomic.StoreInt64(&lastReadAt, time.Now().UnixNano())
 			if !sendEvent(scanEvent{line: documentScanner.Text()}) {
 				return
 			}
@@ -1862,6 +1885,19 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	var keepaliveCh <-chan time.Time
 	if keepaliveTicker != nil {
 		keepaliveCh = keepaliveTicker.C
+	}
+	streamInterval := time.Duration(0)
+	if s.cfg != nil && s.cfg.Gateway.StreamDataIntervalTimeout > 0 {
+		streamInterval = time.Duration(s.cfg.Gateway.StreamDataIntervalTimeout) * time.Second
+	}
+	var intervalTicker *time.Ticker
+	if streamInterval > 0 {
+		intervalTicker = time.NewTicker(streamInterval)
+		defer intervalTicker.Stop()
+	}
+	var intervalCh <-chan time.Time
+	if intervalTicker != nil {
+		intervalCh = intervalTicker.C
 	}
 	var scanErr error
 
@@ -2101,6 +2137,17 @@ scanLoop:
 			}
 			flusher.Flush()
 			lastDownstreamWriteAt = time.Now()
+		case <-intervalCh:
+			lastRead := time.Unix(0, atomic.LoadInt64(&lastReadAt))
+			if time.Since(lastRead) < streamInterval {
+				continue
+			}
+			message := fmt.Sprintf("upstream stream idle for %s", streamInterval)
+			logger.LegacyPrintf("service.openai_gateway", "[OpenAI passthrough] Stream data interval timeout: account=%d model=%s interval=%s", account.ID, originalModel, streamInterval)
+			_ = resp.Body.Close()
+			deliverSyntheticFailure(message)
+			scanErr = errors.New(message)
+			break scanLoop
 		}
 	}
 	ensureResponseFailedTerminal()
