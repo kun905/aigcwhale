@@ -520,7 +520,6 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 
 	forwardResult := &OpenAIForwardResult{
 		RequestID:                     resp.Header.Get("x-request-id"),
-		UpstreamHeaders:               resp.Header,
 		ResponseID:                    responseID,
 		Usage:                         *usage,
 		Model:                         reqModel,
@@ -593,9 +592,6 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 		}
 	case AccountTypeAPIKey:
 		baseURL := account.GetOpenAIBaseURL()
-		if account.UsesNativeCNResponses() && account.IsAdaptiveAPIProtocol() {
-			baseURL = account.GetCNProtocolBaseURL(APIProtocolResponses)
-		}
 		if baseURL != "" {
 			validatedURL, err := s.validateUpstreamBaseURL(baseURL)
 			if err != nil {
@@ -606,7 +602,7 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	}
 	targetURL = appendOpenAIResponsesRequestPathSuffix(targetURL, openAIResponsesRequestPathSuffix(c))
 
-	// DeepSeek / Kimi 原生 Responses 端点为无状态实现（见 normalizeDeepSeekResponsesRequestBody）。
+	// DeepSeek 原生 Responses 端点为无状态实现（见 normalizeDeepSeekResponsesRequestBody）。
 	body = normalizeDeepSeekResponsesRequestBody(account, body)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
@@ -722,7 +718,6 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 
 	// 账号级请求头覆写（仅 openai api_key 账号启用时生效；OAuth 路径 no-op）
 	account.ApplyHeaderOverrides(req.Header)
-	applyOpenCodeSessionHeader(c, account, targetURL, req.Header, body)
 	// x-codex-beta-features：按真实 Codex 的会话级行为补注（在账号级覆写之后，
 	// 保证不被覆盖丢失）。
 	applyOpenAICodexBetaFeatures(c, account, req.Header)
@@ -897,8 +892,6 @@ func (s *OpenAIGatewayService) handleFailoverErrorResponsePassthrough(
 	canonicalModel := canonicalOpenAIAccountSchedulingModel(account, reqModel)
 	shouldDisable := s.handleOpenAIAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, body, canonicalModel)
 	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
-		ProxyID:              opsUpstreamProxyID(account),
-		ProxyName:            opsUpstreamProxyName(account),
 		Platform:             account.Platform,
 		AccountID:            account.ID,
 		AccountName:          account.Name,
@@ -965,8 +958,6 @@ func (s *OpenAIGatewayService) handleErrorResponsePassthrough(
 		_ = s.handleOpenAIAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, body, canonicalModel)
 	}
 	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
-		ProxyID:              opsUpstreamProxyID(account),
-		ProxyName:            opsUpstreamProxyName(account),
 		Platform:             account.Platform,
 		AccountID:            account.ID,
 		AccountName:          account.Name,
@@ -1683,8 +1674,6 @@ func (s *OpenAIGatewayService) recordOpenAIStreamUpstreamError(
 	if c != nil {
 		setOpsUpstreamError(c, statusCode, message, detail)
 		event := OpsUpstreamErrorEvent{
-			ProxyID:            opsUpstreamProxyID(account),
-			ProxyName:          opsUpstreamProxyName(account),
 			Platform:           PlatformOpenAI,
 			UpstreamStatusCode: statusCode,
 			UpstreamRequestID:  strings.TrimSpace(upstreamRequestID),
@@ -1916,21 +1905,21 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			time.Duration(s.cfg.Gateway.StreamKeepaliveInterval)*time.Second)
 	}
 	// 任何返回路径都要停拍。Stop 与心跳 goroutine 之间有互斥锁，
-	// 返回后不会再有字节写出。
-	defer stopKeepalive()
+	// 返回后不会再有字节写出。后续写回通过包装后的 writer，
+	// 由包装器在写入前与心跳建立 happens-before。
+	w = c.Writer
 	// flushPending 表示已写入但未到 SSE 空行边界的脏状态；defer 兜底函数退出前的残留，断连后不再 Flush。
 	flushPending := false
 	pendingSSEEventType := ""
-	lastDownstreamWriteAt := time.Now()
 	flushPendingOutput := func() {
 		if clientDisconnected || !flushPending {
 			return
 		}
 		flusher.Flush()
 		flushPending = false
-		lastDownstreamWriteAt = time.Now()
 	}
 	defer flushPendingOutput()
+	defer stopKeepalive()
 	writePendingLines := func() bool {
 		for _, pending := range pendingLines {
 			if _, err := fmt.Fprintln(w, pending); err != nil {
@@ -1966,6 +1955,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		if clientDisconnected || failureDelivered {
 			return
 		}
+		// Take ownership of the response writer before writing a terminal event;
+		// this synchronizes with the independent SSE keepalive goroutine.
+		stopKeepalive()
 		if !writePendingLines() {
 			return
 		}
@@ -1991,17 +1983,29 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	scanner.Buffer(scanBuf[:0], maxLineSize)
 	documentScanner := newOpenAISSEJSONDocumentScanner(scanner)
 
-	// Read the upstream in a separate goroutine so a slow response body cannot
-	// block downstream SSE keepalives. The scanner buffer remains owned by the
-	// reader goroutine until it exits.
+	streamInterval := time.Duration(0)
+	if s.cfg != nil && s.cfg.Gateway.StreamDataIntervalTimeout > 0 {
+		streamInterval = time.Duration(s.cfg.Gateway.StreamDataIntervalTimeout) * time.Second
+	}
+	var intervalTicker *time.Ticker
+	if streamInterval > 0 {
+		intervalTicker = time.NewTicker(streamInterval)
+		defer intervalTicker.Stop()
+	}
+	var intervalCh <-chan time.Time
+	if intervalTicker != nil {
+		intervalCh = intervalTicker.C
+	}
+
+	// The scanner can block in resp.Body.Read while the upstream is silent. Keep
+	// it off the request goroutine so the interval ticker can terminate a hung
+	// upstream body and the keepalive writer can continue independently.
 	type scanEvent struct {
 		line string
 		err  error
 	}
 	events := make(chan scanEvent, 16)
 	done := make(chan struct{})
-	var lastReadAt int64
-	atomic.StoreInt64(&lastReadAt, time.Now().UnixNano())
 	sendEvent := func(ev scanEvent) bool {
 		select {
 		case events <- ev:
@@ -2010,6 +2014,8 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			return false
 		}
 	}
+	var lastReadAt int64
+	atomic.StoreInt64(&lastReadAt, time.Now().UnixNano())
 	go func(scanBuf *sseScannerBuf64K) {
 		defer putSSEScannerBuf64K(scanBuf)
 		defer close(events)
@@ -2025,8 +2031,8 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	}(scanBuf)
 	defer func() {
 		close(done)
-		// Unblock a reader that is still waiting on the upstream body after an
-		// early return (for example, a pre-output failover).
+		// Unblock a scanner that is still waiting on the upstream body after an
+		// early return (for example, a timeout or pre-output failover).
 		_ = resp.Body.Close()
 	}()
 
@@ -2041,32 +2047,6 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		}
 	}
 
-	keepaliveInterval := time.Duration(0)
-	if s.cfg != nil && s.cfg.Gateway.StreamKeepaliveInterval > 0 {
-		keepaliveInterval = time.Duration(s.cfg.Gateway.StreamKeepaliveInterval) * time.Second
-	}
-	var keepaliveTicker *time.Ticker
-	if keepaliveInterval > 0 {
-		keepaliveTicker = time.NewTicker(keepaliveInterval)
-		defer keepaliveTicker.Stop()
-	}
-	var keepaliveCh <-chan time.Time
-	if keepaliveTicker != nil {
-		keepaliveCh = keepaliveTicker.C
-	}
-	streamInterval := time.Duration(0)
-	if s.cfg != nil && s.cfg.Gateway.StreamDataIntervalTimeout > 0 {
-		streamInterval = time.Duration(s.cfg.Gateway.StreamDataIntervalTimeout) * time.Second
-	}
-	var intervalTicker *time.Ticker
-	if streamInterval > 0 {
-		intervalTicker = time.NewTicker(streamInterval)
-		defer intervalTicker.Stop()
-	}
-	var intervalCh <-chan time.Time
-	if intervalTicker != nil {
-		intervalCh = intervalTicker.C
-	}
 	var scanErr error
 
 scanLoop:
@@ -2081,251 +2061,248 @@ scanLoop:
 				break scanLoop
 			}
 			line := ev.line
-		if eventType, ok := extractOpenAISSEEventLine(line); ok {
-			pendingSSEEventType = eventType
-			eventType = strings.TrimSpace(eventType)
-			suppressCurrentEvent = codexFailureTerminal && (eventType == "error" || (sawBareError && !sawResponseFailed && eventType != "response.failed"))
-		}
-		lineStartsClientOutput := false
-		forceFlushFailedEvent := false
-		if data, ok := extractOpenAISSEDataLine(line); ok {
-			dataBytes := []byte(data)
-			trimmedData := strings.TrimSpace(data)
-			rawEventType := effectiveOpenAISSEEventType(dataBytes, pendingSSEEventType)
-			observer.ObserveOpenAI(dataBytes, rawEventType)
-			if needModelReplace && strings.Contains(data, mappedModel) {
-				line = s.replaceModelInSSELine(line, mappedModel, originalModel)
-				if replacedData, replaced := extractOpenAISSEDataLine(line); replaced {
-					dataBytes = []byte(replacedData)
-					trimmedData = strings.TrimSpace(replacedData)
-				}
+			if eventType, ok := extractOpenAISSEEventLine(line); ok {
+				pendingSSEEventType = eventType
+				eventType = strings.TrimSpace(eventType)
+				suppressCurrentEvent = codexFailureTerminal && (eventType == "error" || (sawBareError && !sawResponseFailed && eventType != "response.failed"))
 			}
-			if normalizedData, normalized := normalizeOpenAIResponsesFunctionCallArguments(dataBytes); normalized {
-				dataBytes = normalizedData
-				trimmedData = strings.TrimSpace(string(normalizedData))
-				line = "data: " + string(normalizedData)
-			}
-			if normalizedData, normalized := normalizeCompletedImageGenerationStatus(dataBytes); normalized {
-				dataBytes = normalizedData
-				trimmedData = strings.TrimSpace(string(normalizedData))
-				line = "data: " + string(normalizedData)
-			}
-			if trimmedData != "[DONE]" {
-				restoredData, restoreErr := restoreOpenAIResponsesNamespacePayload(c, dataBytes)
-				if restoreErr != nil {
-					return resultWithUsage(), fmt.Errorf("restore OpenAI passthrough namespace response: %w", restoreErr)
-				}
-				restoredData = restoreCodexToolNamesFromSSEContext(c, restoredData, rawEventType)
-				if !bytes.Equal(restoredData, dataBytes) {
-					dataBytes = restoredData
-					trimmedData = strings.TrimSpace(string(restoredData))
-					line = "data: " + string(restoredData)
-				}
-			}
-			eventType := effectiveOpenAISSEEventType(dataBytes, rawEventType)
-			if codexFailureTerminal && sawBareError && !sawResponseFailed && eventType != "response.failed" {
-				suppressCurrentEvent = true
-			}
-			if !capacityFailoverSuppressedLogged && account != nil && account.Platform == PlatformOpenAI &&
-				(eventType == "error" || eventType == "response.failed") &&
-				openAIStreamClientOutputStarted(c, clientOutputStarted) &&
-				isOpenAIUpstreamCapacityShedEvent(dataBytes) {
-				logOpenAICapacityFailoverSuppressed(ctx, account, "passthrough_sse", upstreamRequestID, eventType)
-				capacityFailoverSuppressedLogged = true
-			}
-			cyberHit := false
-			if eventType == "response.failed" || eventType == "error" {
-				if codexFailureTerminal && eventType == "error" {
-					sawBareError = true
-					bareErrorPayload = append(bareErrorPayload[:0], dataBytes...)
-					suppressCurrentEvent = true
-				} else if codexFailureTerminal && eventType == "response.failed" {
-					sawResponseFailed = true
-				}
-				responseFailedPending = !codexFailureTerminal || eventType == "response.failed"
-				failedMessage = extractOpenAISSEErrorMessage(dataBytes)
-				if failedMessage == "" {
-					failedMessage = "Upstream response failed"
-				}
-				// response.failed 自带上游已消耗的 usage（input token 通常已扣）；必须先解析
-				// 再打 cyber 标记，否则 mark 记到的是解析前的 0，导致流式 cyber 按 0 token 计费
-				// 而漏记真实用量。对齐 WS V2 / Chat 流式路径（均先解析 usage 再 Mark）。
-				s.parseSSEUsageBytesWithType(dataBytes, eventType, usage)
-				if hit, code, msg := detectOpenAICyberPolicy(dataBytes); hit {
-					cyberHit = true
-					MarkOpsCyberPolicy(c, CyberPolicyMark{
-						Code:           code,
-						Message:        msg,
-						Body:           truncateString(string(dataBytes), 4096),
-						UpstreamStatus: http.StatusOK,
-						UpstreamInTok:  usage.InputTokens,
-						UpstreamOutTok: usage.OutputTokens,
-					})
-				}
-				outputStarted := openAIStreamClientOutputStarted(c, clientOutputStarted)
-				if !outputStarted && !cyberHit {
-					if compactErr := newOpenAICompactFallbackSignal(c, dataBytes, failedMessage); compactErr != nil {
-						return resultWithUsage(), compactErr
+			lineStartsClientOutput := false
+			forceFlushFailedEvent := false
+			if data, ok := extractOpenAISSEDataLine(line); ok {
+				dataBytes := []byte(data)
+				trimmedData := strings.TrimSpace(data)
+				rawEventType := effectiveOpenAISSEEventType(dataBytes, pendingSSEEventType)
+				observer.ObserveOpenAI(dataBytes, rawEventType)
+				if needModelReplace && strings.Contains(data, mappedModel) {
+					line = s.replaceModelInSSELine(line, mappedModel, originalModel)
+					if replacedData, replaced := extractOpenAISSEDataLine(line); replaced {
+						dataBytes = []byte(replacedData)
+						trimmedData = strings.TrimSpace(replacedData)
 					}
 				}
-				if outputStarted && !cyberHit {
-					if codexFailureTerminal && eventType == "error" {
-						// Wait for the authoritative response.failed before mutating
-						// account health; EOF synthesis applies the pending effect.
-						bareErrorAccountSideEffectsPending = true
-					} else {
-						s.handleOpenAIStreamTerminalAccountSideEffects(c, account, dataBytes, failedMessage, resp.Header, mappedModel)
-						bareErrorAccountSideEffectsPending = false
-					}
-					if eventType == "response.failed" {
-						// The stream cannot be replayed after semantic output. Preserve the
-						// terminal event, while making the upstream failure queryable.
-						s.recordOpenAIStreamUpstreamError(c, account, true, upstreamRequestID, "stream_failed", dataBytes, failedMessage)
-					}
+				if normalizedData, normalized := normalizeOpenAIResponsesFunctionCallArguments(dataBytes); normalized {
+					dataBytes = normalizedData
+					trimmedData = strings.TrimSpace(string(normalizedData))
+					line = "data: " + string(normalizedData)
 				}
-				if !outputStarted {
-					shouldFailover := false
-					if !cyberHit {
-						if eventType == "error" {
-							shouldFailover = openAIStreamErrorEventShouldFailover(dataBytes, failedMessage)
-						} else {
-							shouldFailover = openAIStreamFailedEventShouldFailover(dataBytes, failedMessage)
-						}
-					}
-					if shouldFailover {
-						return resultWithUsage(),
-							s.newOpenAIStreamFailoverErrorWithModel(c, account, true, upstreamRequestID, dataBytes, failedMessage, mappedModel, resp.Header)
-					}
-					if !cyberHit && !sawBareError {
-						if status, errType, errMsg, matched := applyOpenAIStreamFailedErrorPassthroughRule(c, account.Platform, dataBytes, failedMessage); matched {
-							// 命中透传规则也要记录 ops 上游错误事件（对齐 CC/Messages 与
-							// antigravity 先例），否则透传命中的 failed 在监控中不可见。
-							s.recordOpenAIStreamUpstreamError(c, account, true, upstreamRequestID, "http_error", dataBytes, failedMessage)
-							MarkResponseCommitted(c)
-							c.Writer.Header().Set("Content-Type", "application/json; charset=utf-8")
-							c.JSON(status, gin.H{
-								"error": gin.H{
-									"type":    errType,
-									"message": errMsg,
-								},
-							})
-							return resultWithUsage(), fmt.Errorf("upstream response failed: passthrough rule matched message=%s", errMsg)
-						}
-					}
+				if normalizedData, normalized := normalizeCompletedImageGenerationStatus(dataBytes); normalized {
+					dataBytes = normalizedData
+					trimmedData = strings.TrimSpace(string(normalizedData))
+					line = "data: " + string(normalizedData)
 				}
-				forceFlushFailedEvent = true
-				sawFailedEvent = true
-			}
-			if trimmedData == "[DONE]" {
-				sawDone = true
-				terminalEventType = "[DONE]"
-			}
-			if openAIStreamEventIsTerminalWithType(trimmedData, eventType) {
-				sawTerminalEvent = true
 				if trimmedData != "[DONE]" {
-					terminalEventType = eventType
+					restoredData, restoreErr := restoreOpenAIResponsesNamespacePayload(c, dataBytes)
+					if restoreErr != nil {
+						return resultWithUsage(), fmt.Errorf("restore OpenAI passthrough namespace response: %w", restoreErr)
+					}
+					restoredData = restoreCodexToolNamesFromSSEContext(c, restoredData, rawEventType)
+					if !bytes.Equal(restoredData, dataBytes) {
+						dataBytes = restoredData
+						trimmedData = strings.TrimSpace(string(restoredData))
+						line = "data: " + string(restoredData)
+					}
 				}
+				eventType := effectiveOpenAISSEEventType(dataBytes, rawEventType)
+				if codexFailureTerminal && sawBareError && !sawResponseFailed && eventType != "response.failed" {
+					suppressCurrentEvent = true
+				}
+				if !capacityFailoverSuppressedLogged && account != nil && account.Platform == PlatformOpenAI &&
+					(eventType == "error" || eventType == "response.failed") &&
+					openAIStreamClientOutputStarted(c, clientOutputStarted) &&
+					isOpenAIUpstreamCapacityShedEvent(dataBytes) {
+					logOpenAICapacityFailoverSuppressed(ctx, account, "passthrough_sse", upstreamRequestID, eventType)
+					capacityFailoverSuppressedLogged = true
+				}
+				cyberHit := false
+				if eventType == "response.failed" || eventType == "error" {
+					if codexFailureTerminal && eventType == "error" {
+						sawBareError = true
+						bareErrorPayload = append(bareErrorPayload[:0], dataBytes...)
+						suppressCurrentEvent = true
+					} else if codexFailureTerminal && eventType == "response.failed" {
+						sawResponseFailed = true
+					}
+					responseFailedPending = !codexFailureTerminal || eventType == "response.failed"
+					failedMessage = extractOpenAISSEErrorMessage(dataBytes)
+					if failedMessage == "" {
+						failedMessage = "Upstream response failed"
+					}
+					// response.failed 自带上游已消耗的 usage（input token 通常已扣）；必须先解析
+					// 再打 cyber 标记，否则 mark 记到的是解析前的 0，导致流式 cyber 按 0 token 计费
+					// 而漏记真实用量。对齐 WS V2 / Chat 流式路径（均先解析 usage 再 Mark）。
+					s.parseSSEUsageBytesWithType(dataBytes, eventType, usage)
+					if hit, code, msg := detectOpenAICyberPolicy(dataBytes); hit {
+						cyberHit = true
+						MarkOpsCyberPolicy(c, CyberPolicyMark{
+							Code:           code,
+							Message:        msg,
+							Body:           truncateString(string(dataBytes), 4096),
+							UpstreamStatus: http.StatusOK,
+							UpstreamInTok:  usage.InputTokens,
+							UpstreamOutTok: usage.OutputTokens,
+						})
+					}
+					outputStarted := openAIStreamClientOutputStarted(c, clientOutputStarted)
+					if !outputStarted && !cyberHit {
+						if compactErr := newOpenAICompactFallbackSignal(c, dataBytes, failedMessage); compactErr != nil {
+							return resultWithUsage(), compactErr
+						}
+					}
+					if outputStarted && !cyberHit {
+						if codexFailureTerminal && eventType == "error" {
+							// Wait for the authoritative response.failed before mutating
+							// account health; EOF synthesis applies the pending effect.
+							bareErrorAccountSideEffectsPending = true
+						} else {
+							s.handleOpenAIStreamTerminalAccountSideEffects(c, account, dataBytes, failedMessage, resp.Header, mappedModel)
+							bareErrorAccountSideEffectsPending = false
+						}
+					}
+					if !outputStarted {
+						shouldFailover := false
+						if !cyberHit {
+							if eventType == "error" {
+								shouldFailover = openAIStreamErrorEventShouldFailover(dataBytes, failedMessage)
+							} else {
+								shouldFailover = openAIStreamFailedEventShouldFailover(dataBytes, failedMessage)
+							}
+						}
+						if shouldFailover {
+							return resultWithUsage(),
+								s.newOpenAIStreamFailoverErrorWithModel(c, account, true, upstreamRequestID, dataBytes, failedMessage, mappedModel, resp.Header)
+						}
+						if !cyberHit && !sawBareError {
+							if status, errType, errMsg, matched := applyOpenAIStreamFailedErrorPassthroughRule(c, account.Platform, dataBytes, failedMessage); matched {
+								// 命中透传规则也要记录 ops 上游错误事件（对齐 CC/Messages 与
+								// antigravity 先例），否则透传命中的 failed 在监控中不可见。
+								s.recordOpenAIStreamUpstreamError(c, account, true, upstreamRequestID, "http_error", dataBytes, failedMessage)
+								MarkResponseCommitted(c)
+								c.Writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+								c.JSON(status, gin.H{
+									"error": gin.H{
+										"type":    errType,
+										"message": errMsg,
+									},
+								})
+								return resultWithUsage(), fmt.Errorf("upstream response failed: passthrough rule matched message=%s", errMsg)
+							}
+						}
+					}
+					forceFlushFailedEvent = true
+					sawFailedEvent = true
+				}
+				if trimmedData == "[DONE]" {
+					sawDone = true
+					terminalEventType = "[DONE]"
+				}
+				if openAIStreamEventIsTerminalWithType(trimmedData, eventType) {
+					sawTerminalEvent = true
+					if trimmedData != "[DONE]" {
+						terminalEventType = eventType
+					}
+				}
+				if responseID == "" {
+					responseID = extractOpenAIResponseIDFromJSONBytes(dataBytes)
+				}
+				imageCounter.AddSSEData(dataBytes)
+				if sanitizedData, sanitized := sanitizeOpenAIResponseFailedEventForClient(
+					dataBytes,
+					eventType,
+					openAIStreamClientOutputStarted(c, clientOutputStarted),
+				); sanitized {
+					dataBytes = sanitizedData
+					trimmedData = strings.TrimSpace(string(sanitizedData))
+					line = "data: " + string(sanitizedData)
+				}
+				lineStartsClientOutput = forceFlushFailedEvent || openAIStreamDataStartsClientOutput(trimmedData, eventType)
+				if lineStartsClientOutput && trimmedData != "[DONE]" && !openAIStreamEventTypeIsTerminal(eventType) {
+					semanticOutputSeen = true
+				}
+				// OpenAI Responses streams that terminate with an empty
+				// response.completed (no output, no usage, no error, nothing sent
+				// to the client) are silent upstream refusals: fail over instead of
+				// recording a successful 0/0 usage turn (issue #5009).
+				if (eventType == "response.completed" || eventType == "response.done") &&
+					!sawFailedEvent && !semanticOutputSeen && !clientOutputStarted &&
+					openAIResponsesCompletedEventIsEmpty(dataBytes, usage) {
+					return resultWithUsage(), newOpenAIResponsesEmptyCompletedFailoverError(c, account, upstreamRequestID)
+				}
+				if firstTokenMs == nil && openAIStreamDataStartsTTFT(trimmedData, eventType, forceFlushFailedEvent, ttftMode) {
+					ms := int(time.Since(startTime).Milliseconds())
+					firstTokenMs = &ms
+				}
+				s.parseSSEUsageBytesWithType(dataBytes, eventType, usage)
 			}
-			if responseID == "" {
-				responseID = extractOpenAIResponseIDFromJSONBytes(dataBytes)
-			}
-			imageCounter.AddSSEData(dataBytes)
-			if sanitizedData, sanitized := sanitizeOpenAIResponseFailedEventForClient(
-				dataBytes,
-				eventType,
-				openAIStreamClientOutputStarted(c, clientOutputStarted),
-			); sanitized {
-				dataBytes = sanitizedData
-				trimmedData = strings.TrimSpace(string(sanitizedData))
-				line = "data: " + string(sanitizedData)
-			}
-			lineStartsClientOutput = forceFlushFailedEvent || openAIStreamDataStartsClientOutput(trimmedData, eventType)
-			if lineStartsClientOutput && trimmedData != "[DONE]" && !openAIStreamEventTypeIsTerminal(eventType) {
-				semanticOutputSeen = true
-			}
-			// OpenAI Responses streams that terminate with an empty
-			// response.completed (no output, no usage, no error, nothing sent
-			// to the client) are silent upstream refusals: fail over instead of
-			// recording a successful 0/0 usage turn (issue #5009).
-			if (eventType == "response.completed" || eventType == "response.done") &&
-				!sawFailedEvent && !semanticOutputSeen && !clientOutputStarted &&
-				openAIResponsesCompletedEventIsEmpty(dataBytes, usage) {
-				return resultWithUsage(), newOpenAIResponsesEmptyCompletedFailoverError(c, account, upstreamRequestID)
-			}
-			if firstTokenMs == nil && openAIStreamDataStartsTTFT(trimmedData, eventType, forceFlushFailedEvent, ttftMode) {
-				ms := int(time.Since(startTime).Milliseconds())
-				firstTokenMs = &ms
-			}
-			s.parseSSEUsageBytesWithType(dataBytes, eventType, usage)
-		}
-		if line == "" {
-			pendingSSEEventType = ""
-			if suppressCurrentEvent {
-				suppressCurrentEvent = false
-				responseFailedPending = false
-				continue
-			}
-		}
-
-		if !clientDisconnected && !failureDelivered && !suppressCurrentEvent {
-			if !clientOutputStarted && !lineStartsClientOutput {
-				pendingLines = append(pendingLines, line)
-				continue
-			}
-			// 真实输出开始，心跳的使命结束。停拍是幂等的，且会与心跳 goroutine
-			// 建立 happens-before —— 之后 ResponseWriter 由本循环独占。
-			if !clientOutputStarted {
-				stopKeepalive()
-			}
-			if !clientOutputStarted && len(pendingLines) > 0 {
-				if !writePendingLines() {
+			if line == "" {
+				pendingSSEEventType = ""
+				if suppressCurrentEvent {
+					suppressCurrentEvent = false
+					responseFailedPending = false
 					continue
 				}
 			}
-			if _, err := fmt.Fprintln(w, line); err != nil {
-				clientDisconnected = true
-				logger.LegacyPrintf("service.openai_gateway", "[OpenAI passthrough] Client disconnected during streaming, continue draining upstream for usage: account=%d", account.ID)
-			} else {
-				clientOutputStarted = true
-				flushPending = true
-				if line == "" {
-					flushPendingOutput()
+
+			if !clientDisconnected && !failureDelivered && !suppressCurrentEvent {
+				if !clientOutputStarted && !lineStartsClientOutput {
+					pendingLines = append(pendingLines, line)
+					continue
+				}
+				// 真实输出开始，心跳的使命结束。停拍是幂等的，且会与心跳 goroutine
+				// 建立 happens-before —— 之后 ResponseWriter 由本循环独占。
+				if !clientOutputStarted {
+					stopKeepalive()
+				}
+				if !clientOutputStarted && len(pendingLines) > 0 {
+					if !writePendingLines() {
+						continue
+					}
+				}
+				if _, err := fmt.Fprintln(w, line); err != nil {
+					clientDisconnected = true
+					logger.LegacyPrintf("service.openai_gateway", "[OpenAI passthrough] Client disconnected during streaming, continue draining upstream for usage: account=%d", account.ID)
+				} else {
+					clientOutputStarted = true
+					flushPending = true
+					if line == "" {
+						flushPendingOutput()
+					}
 				}
 			}
-		}
-		if line == "" && responseFailedPending {
-			responseFailedPending = false
-			failureDelivered = true
-		}
-
-		case <-keepaliveCh:
-			// Never inject a comment into the middle of an SSE event. A comment
-			// is otherwise safe before the first semantic event; its bytes are
-			// tracked so pre-output failover remains available.
-			if clientDisconnected || failureDelivered || flushPending ||
-				time.Since(lastDownstreamWriteAt) < keepaliveInterval {
-				continue
+			if line == "" && responseFailedPending {
+				responseFailedPending = false
+				failureDelivered = true
 			}
-			n, err := fmt.Fprint(w, ":\n\n")
-			recordOpenAIStreamKeepaliveBytes(c, n)
-			if err != nil {
-				clientDisconnected = true
-				logger.LegacyPrintf("service.openai_gateway", "[OpenAI passthrough] Client disconnected during keepalive, continue draining upstream for usage: account=%d", account.ID)
-				continue
-			}
-			flusher.Flush()
-			lastDownstreamWriteAt = time.Now()
 		case <-intervalCh:
 			lastRead := time.Unix(0, atomic.LoadInt64(&lastReadAt))
 			if time.Since(lastRead) < streamInterval {
 				continue
 			}
 			message := fmt.Sprintf("upstream stream idle for %s", streamInterval)
-			logger.LegacyPrintf("service.openai_gateway", "[OpenAI passthrough] Stream data interval timeout: account=%d model=%s interval=%s", account.ID, originalModel, streamInterval)
+			logger.LegacyPrintf(
+				"service.openai_gateway",
+				"[OpenAI passthrough] Stream data interval timeout: account=%d model=%s interval=%s",
+				account.ID,
+				originalModel,
+				streamInterval,
+			)
 			_ = resp.Body.Close()
+			// Keep pre-output failover viable: a downstream keepalive (or buffered
+			// response.created event) is not semantic output, so do not append a
+			// response.failed frame before returning the typed failover error.
+			if !openAIStreamClientOutputStarted(c, clientOutputStarted) {
+				return resultWithUsage(),
+					s.newOpenAIStreamFailoverErrorWithModel(c, account, true, upstreamRequestID, nil, message, mappedModel, resp.Header)
+			}
+			if sawBareError && !sawResponseFailed {
+				stopKeepalive()
+				ensureResponseFailedTerminal()
+				return resultWithUsage(), fmt.Errorf("upstream response failed: %s", failedMessage)
+			}
 			deliverSyntheticFailure(message)
-			scanErr = errors.New(message)
-			break scanLoop
+			if clientDisconnected {
+				return resultWithUsage(), fmt.Errorf("stream usage incomplete after disconnect: %s", message)
+			}
+			return resultWithUsage(), fmt.Errorf("stream data interval timeout: %s", message)
 		}
 	}
 	ensureResponseFailedTerminal()
