@@ -44,7 +44,7 @@ func runPassthroughIdleTimeoutTest(t *testing.T, keepaliveSeconds, timeoutSecond
 
 func TestOpenAIStreamingPassthroughReturnsFailoverBeforeSemanticOutput(t *testing.T) {
 	resultCh, recorder, upstream := runPassthroughIdleTimeoutTest(t, 0, 1)
-	defer upstream.Close()
+	defer func() { _ = upstream.Close() }()
 
 	select {
 	case err := <-resultCh:
@@ -63,7 +63,7 @@ func TestOpenAIStreamingPassthroughReturnsFailoverBeforeSemanticOutput(t *testin
 
 func TestOpenAIStreamingPassthroughWritesTerminalFailureAfterOutput(t *testing.T) {
 	resultCh, recorder, upstream := runPassthroughIdleTimeoutTest(t, 0, 1)
-	defer upstream.Close()
+	defer func() { _ = upstream.Close() }()
 
 	_, err := upstream.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n"))
 	require.NoError(t, err)
@@ -86,7 +86,7 @@ func TestOpenAIStreamingPassthroughWritesTerminalFailureAfterOutput(t *testing.T
 
 func TestOpenAIStreamingPassthroughKeepaliveRunsWhileUpstreamReadBlocks(t *testing.T) {
 	resultCh, recorder, upstream := runPassthroughIdleTimeoutTest(t, 1, 2)
-	defer upstream.Close()
+	defer func() { _ = upstream.Close() }()
 
 	select {
 	case err := <-resultCh:
