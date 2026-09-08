@@ -42,5 +42,8 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            GOPROXY=https://proxy.golang.org,direct
+            GOSUMDB=sum.golang.org
           cache-from: type=gha
           cache-to: type=gha,mode=max
