@@ -12,6 +12,59 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestGroupImageGenerationRouting_RepositoryRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	tx := testEntTx(t)
+	repo := newGroupRepositoryWithSQL(tx.Client(), tx)
+	targetA := mustCreateGroup(t, tx.Client(), &service.Group{
+		Name: "image-routing-roundtrip-target-a", Platform: service.PlatformOpenAI,
+	})
+	targetB := mustCreateGroup(t, tx.Client(), &service.Group{
+		Name: "image-routing-roundtrip-target-b", Platform: service.PlatformOpenAI,
+	})
+	source := &service.Group{
+		Name:                   "image-routing-roundtrip-source",
+		Platform:               service.PlatformOpenAI,
+		Status:                 service.StatusActive,
+		SubscriptionType:       service.SubscriptionTypeStandard,
+		RateMultiplier:         1,
+		ImageGenerationGroupID: &targetA.ID,
+	}
+	require.NoError(t, repo.Create(ctx, source))
+
+	checkRoute := func(expected *int64) {
+		t.Helper()
+		full, err := repo.GetByID(ctx, source.ID)
+		require.NoError(t, err)
+		require.Equal(t, expected, full.ImageGenerationGroupID)
+		lite, err := repo.GetByIDLite(ctx, source.ID)
+		require.NoError(t, err)
+		require.Equal(t, expected, lite.ImageGenerationGroupID,
+			"request-time lookup must see the route saved by the repository")
+	}
+	checkRoute(&targetA.ID)
+	linked, err := repo.HasImageGenerationRouteTo(ctx, targetA.ID)
+	require.NoError(t, err)
+	require.True(t, linked)
+
+	source.ImageGenerationGroupID = &targetB.ID
+	require.NoError(t, repo.Update(ctx, source))
+	checkRoute(&targetB.ID)
+	linked, err = repo.HasImageGenerationRouteTo(ctx, targetA.ID)
+	require.NoError(t, err)
+	require.False(t, linked, "the old target must no longer be referenced")
+	linked, err = repo.HasImageGenerationRouteTo(ctx, targetB.ID)
+	require.NoError(t, err)
+	require.True(t, linked)
+
+	source.ImageGenerationGroupID = nil
+	require.NoError(t, repo.Update(ctx, source))
+	checkRoute(nil)
+	linked, err = repo.HasImageGenerationRouteTo(ctx, targetB.ID)
+	require.NoError(t, err)
+	require.False(t, linked, "clearing the route must remove the persisted reference")
+}
+
 // The routing target is deliberately a database-level self-reference.  This
 // test verifies the safety property that deleting a target disables routing on
 // source groups instead of leaving a dangling ID.

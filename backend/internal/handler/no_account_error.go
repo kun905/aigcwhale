@@ -15,7 +15,7 @@ import (
 
 // noAccountErrorClassification describes the HTTP response to emit when
 // account selection failed with ErrNoAvailableAccounts. Handlers obtain it
-// via classifyNoAccountError and choose between:
+// via classifyNoAccountErrorForGroup and choose between:
 //
 //   - 404 model_not_found — the group has accounts, but none of them are
 //     configured to serve the requested model (config / typo / unsupported
@@ -43,7 +43,7 @@ func classifySelectionFailureError(err error, fallback noAccountErrorClassificat
 		return fallback
 	}
 	// A 404 model_not_found fallback is authoritative and must not be downgraded
-	// to a rate-limit verdict. classifyNoAccountError only reaches it through
+	// to a rate-limit verdict. classifyNoAccountErrorForGroup only reaches it through
 	// DiagnoseModelAvailabilityForPlatform, a dedicated database query over
 	// persistent eligibility (active + schedulable + model_mapping) that already
 	// established no account in the group can serve this model at all. A transient
@@ -74,8 +74,12 @@ func classifySelectionFailureError(err error, fallback noAccountErrorClassificat
 	}
 }
 
-// classifyNoAccountError decides between 404 model_not_found and 503
+// classifyNoAccountErrorForGroup decides between 404 model_not_found and 503
 // api_error for "no available accounts" failures.
+//
+// The diagnosis uses the account pool that selection actually used. Most
+// requests use the API key's source group, while routed image requests pass
+// their target group explicitly.
 //
 // The classifier intentionally does not consume the original error: the
 // selection layer never tells us *why* the pool came up empty (rate-limited
@@ -98,24 +102,6 @@ func classifySelectionFailureError(err error, fallback noAccountErrorClassificat
 // required because Anthropic/Gemini routes additionally surface
 // mixed-scheduled Antigravity accounts; passing the wrong platform would
 // flip a legitimate 503 to a misleading 404 (or vice versa).
-func classifyNoAccountError(
-	ctx context.Context,
-	diag service.ModelAvailabilityDiagnoser,
-	apiKey *service.APIKey,
-	routingModel string,
-	displayModel string,
-	platform string,
-) noAccountErrorClassification {
-	var groupID *int64
-	if apiKey != nil {
-		groupID = apiKey.GroupID
-	}
-	return classifyNoAccountErrorForGroup(ctx, diag, groupID, routingModel, displayModel, platform)
-}
-
-// classifyNoAccountErrorForGroup runs the availability diagnosis against the
-// account pool that selection actually used. Most requests use the API key's
-// source group, while routed image requests pass their target group explicitly.
 func classifyNoAccountErrorForGroup(
 	ctx context.Context,
 	diag service.ModelAvailabilityDiagnoser,

@@ -1,0 +1,138 @@
+name: Verify Image Routing Release
+run-name: Verify image routing on ${{ github.ref_name }}
+
+on:
+  workflow_dispatch:
+  # A new workflow cannot be manually dispatched until GitHub registers it
+  # on the default branch. This narrow trigger validates the feature branch
+  # without changing main or adding checks to ordinary code pushes.
+  push:
+    branches:
+      - feature/image-routing-group
+    paths:
+      - .github/workflows/verify-image-routing.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CI: "true"
+    defaults:
+      run:
+        shell: bash
+        working-directory: backend
+    steps:
+      - name: Checkout selected revision
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          check-latest: false
+          cache-dependency-path: backend/go.sum
+
+      - name: Verify toolchain and Docker
+        run: |
+          go version
+          docker info
+
+      # The existing TestMain starts PostgreSQL 18.1 and Redis 8.4, applies
+      # every migration, and fails instead of skipping when CI is set.
+      - name: Verify PostgreSQL migrations, repositories, and Redis
+        run: |
+          go test -mod=readonly -tags=integration -count=1 -timeout=20m -json \
+            ./internal/repository \
+            -run '^(TestMigrationsRunner_(IsIdempotent_AndSchemaIsUpToDate|ConcurrentInstancesSerializeOnSessionLock)|TestGroupImageGenerationRouting_.*|TestGetByKeyForAuthCarriesImageGenerationGroupID|TestAuthCacheInvalidationTriggers_CoverSecurityMutationsOnly|TestAuthCacheInvalidationTrigger_ProfitControlColumns|TestGroupRepoSuite|TestApiKeyCacheSuite|TestGatewayCacheSuite|TestSchedulerCache.*Integration)$' \
+            | tee "$RUNNER_TEMP/image-routing-integration.jsonl"
+
+      # Keep this separate from the full CI suite so unrelated existing unit
+      # failures cannot prevent the real database checks above from running.
+      - name: Verify image routing API, billing, and continuation contracts
+        run: |
+          go test -mod=readonly -tags=unit -count=1 -timeout=15m -json \
+            ./internal/handler ./internal/handler/admin ./internal/handler/dto \
+            ./internal/server/middleware ./internal/service ./migrations \
+            -run 'ImageGeneration|ImageRouting|ImagesRouting|RoutedImage|SourcePricingGroupKeepsLegacyImagePath|SameGroupPricingGroupKeepsTextPricing|APIKeyPassthrough_ImageIntent|Continuation.*RoutingGroup|SelectAccountWithScheduler_DefaultDisabled(RequiredPreviousAffinityHonorsBinding|UsesLegacyLoadAwareness)|Migration239|Classify.*NoAccountError' \
+            | tee "$RUNNER_TEMP/image-routing-unit.jsonl"
+
+      - name: Require executed tests and reject skipped coverage
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const reports = [
+            {
+              name: 'integration',
+              required: [
+                'TestMigrationsRunner_IsIdempotent_AndSchemaIsUpToDate',
+                'TestMigrationsRunner_ConcurrentInstancesSerializeOnSessionLock',
+                'TestGroupImageGenerationRouting_TargetDeleteClearsSource',
+                'TestGroupImageGenerationRouting_SoftDeletedTargetRemainsFailClosed',
+                'TestGroupImageGenerationRouting_RepositoryRoundTrip',
+                'TestGetByKeyForAuthCarriesImageGenerationGroupID',
+                'TestAuthCacheInvalidationTriggers_CoverSecurityMutationsOnly',
+                'TestAuthCacheInvalidationTrigger_ProfitControlColumns',
+                'TestGroupRepoSuite/TestCreate',
+                'TestGroupRepoSuite/TestUpdate',
+                'TestGroupRepoSuite/TestDelete',
+                'TestApiKeyCacheSuite/TestDailyUsage',
+                'TestGatewayCacheSuite/TestSetAndGetSessionAccountID',
+                'TestSchedulerCacheRetireAndReopenFencesOldEpochIntegration',
+                'TestSchedulerCacheGroupLifecycleLeaseOwnerAndTTLIntegration',
+              ],
+            },
+            {
+              name: 'unit',
+              required: [
+                'TestGroupHandlerImageRoutingValidationHTTPStatus',
+                'TestGroupMapperExposesImageGenerationTargetOnlyToAdmins',
+                'TestOpenAIResponsesWebSocketImageRoutingPreviousResponsePoolBoundary',
+                'TestOpenAIResponsesImageRoutingPreviousResponseLookupFailureFailsClosed',
+                'TestOpenAIResponsesWebSocketImageRoutingPreviousResponseAffinityFailoverStripsID',
+                'TestAdminService_UpdateGroup_ImageGenerationTargetSetKeepAndClear',
+                'TestGroupModelAllowlistDefersConfiguredImageGenerationTarget',
+                'TestOpenAIGatewayServiceRecordUsage_RoutedImageUsesTargetPricingButSourceOwnership',
+                'TestOpenAIGatewayServiceRecordUsage_RoutedImageZeroOutputUsesTargetTokenPricingAndAccountStats',
+                'TestAPIKeyService_SnapshotRoundTrip_PreservesImageGenerationGroupID',
+                'TestOpenAIGatewayService_SelectAccountWithScheduler_DefaultDisabledRequiredPreviousAffinityHonorsBinding',
+                'TestMigration239AddsImageGenerationGroupRouting',
+              ],
+            },
+          ];
+          const summary = [`Verified commit: \`${process.env.GITHUB_SHA}\``, ''];
+          for (const report of reports) {
+            const file = path.join(process.env.RUNNER_TEMP, `image-routing-${report.name}.jsonl`);
+            const events = fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).map(JSON.parse);
+            const skippedOrFailed = events.filter(event => event.Action === 'skip' || event.Action === 'fail');
+            const ran = new Set(events.filter(event => event.Action === 'run').map(event => event.Test));
+            const passed = new Set(events.filter(event => event.Action === 'pass' && event.Test).map(event => event.Test));
+            const missing = report.required.filter(test => !ran.has(test) || !passed.has(test));
+            if (skippedOrFailed.length || missing.length) {
+              console.error(`${report.name}: skipped/failed tests:`, skippedOrFailed);
+              console.error(`${report.name}: required tests did not run and pass:`, missing);
+              process.exit(1);
+            }
+            const line = `${report.name}: ${passed.size} tests/subtests passed; no skips; all required checks executed.`;
+            console.log(line);
+            summary.push(line);
+          }
+          summary.push('', 'PostgreSQL/Redis use the existing repository testcontainers fixture.',
+            'These checks do not call paid image providers or production services.');
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary.join('\n') + '\n');
+          NODE
+
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: image-routing-verification-${{ github.sha }}
+          path: ${{ runner.temp }}/image-routing-*.jsonl
+          if-no-files-found: error
+          retention-days: 14

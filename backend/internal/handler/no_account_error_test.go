@@ -15,6 +15,21 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
+func classifyNoAccountError(
+	ctx context.Context,
+	diag service.ModelAvailabilityDiagnoser,
+	apiKey *service.APIKey,
+	routingModel string,
+	displayModel string,
+	platform string,
+) noAccountErrorClassification {
+	var groupID *int64
+	if apiKey != nil {
+		groupID = apiKey.GroupID
+	}
+	return classifyNoAccountErrorForGroup(ctx, diag, groupID, routingModel, displayModel, platform)
+}
+
 type fakeDiagnoser struct {
 	calls []fakeDiagnoseCall
 	resp  service.ModelAvailabilityDiagnosis
