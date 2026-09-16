@@ -346,10 +346,10 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	}
 
 	apiKey := getAPIKeyFromContext(c)
-	imageGenerationAllowed := GroupAllowsImageGeneration(nil)
-	if apiKey != nil {
-		imageGenerationAllowed = GroupAllowsImageGeneration(apiKey.Group)
-	}
+	// 图片请求可以由认证 API Key 所属的 GPT 源分组路由到专用图片分组。
+	// 这里只切换图片能力开关；配额、余额/订阅及 usage owner 仍绑定源分组。
+	permissionGroup := OpenAIImageGenerationGroupForRequest(ctx, apiKeyGroup(apiKey))
+	imageGenerationAllowed := GroupAllowsImageGeneration(permissionGroup)
 	codexImageGenerationBridgeEnabled := isCodexCLI &&
 		!isOpenAIResponsesLiteHeader(c.GetHeader(responsesLiteHeader)) &&
 		imageGenerationAllowed &&

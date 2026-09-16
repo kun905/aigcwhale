@@ -11,8 +11,9 @@ package service
 //
 //   - D（用户售价倍率）固定在请求开始的 pricingAt：同一请求的全部 failover 与
 //     最终扣费共用同一 D（RecordUsage 的高峰因子同样取 pricingAt），一个请求
-//     不会中途变价。D 与计费完全同源：按请求真实计费分组（ctxkey.Group，即
-//     apiKey 自身分组；composite 请求为父分组）做 ResolveUserGroupRateMultiplier
+//     不会中途变价。D 与计费完全同源：普通请求按 ctxkey.Group（apiKey 自身
+//     分组；composite 请求为父分组），明确生图且已路由时按图片目标组，做
+//     ResolveUserGroupRateMultiplier
 //     （用户-分组覆盖 ?? 分组默认）× Group.PeakMultiplierAt(pricingAt)，绝不在
 //     用户有覆盖时退回分组默认；开关与 margin/buffer 则始终取被调度
 //     openai/grok 分组。
@@ -221,10 +222,13 @@ func (s *OpenAIGatewayService) resolveOpenAIProfitControlGate(ctx context.Contex
 	// 门配置取被调度分组。直连请求（ctx 认证分组即调度分组，生产绝大多数流量）
 	// 直接复用 auth cache 分组，热路径零额外查询；composite 父分组路由到成员
 	// 分组等 ID 不一致场景才回源仓库读取。auth 快照的分组字段完备性由
-	// GetByKeyForAuth 投影 + 集成测试保证（防投影漏列导致门静默失效）。
+	// GetByKeyForAuth 投影 + 集成测试保证（防投影漏列导致门静默失效）。明确生图路由已在
+	// handler 层加载并验证目标组，这里优先复用请求级对象。
 	var group *Group
 	if ctxGroup, ok := ctx.Value(ctxkey.Group).(*Group); ok && IsGroupContextValid(ctxGroup) && ctxGroup.ID == *groupID {
 		group = ctxGroup
+	} else if routedImageGroup, ok := OpenAIImageGenerationGroupFromContext(ctx); ok && routedImageGroup.ID == *groupID {
+		group = routedImageGroup
 	} else if s.schedulerSnapshot != nil {
 		// Lite 读取：门只用平台/倍率/利润/高峰字段，不需要账号计数聚合。
 		loaded, err := s.schedulerSnapshot.GetGroupByIDLite(ctx, *groupID)
@@ -245,12 +249,17 @@ func (s *OpenAIGatewayService) resolveOpenAIProfitControlGate(ctx context.Contex
 	if !ok {
 		pricingAt = timezone.Now()
 	}
-	// D 与计费完全同源（RecordUsage 组合）：计费永远按 apiKey 自身分组
-	//（composite 请求即父分组）的"用户覆盖 ?? 分组默认 × 高峰因子"计算，
-	// 因此优先取认证中间件放入 ctx 的分组；ctx 中无有效分组（内部调用）时
-	// 退回调度分组组合，直连 openai 分组场景两者等价。
+	// D 与计费完全同源（RecordUsage 组合）：普通请求按 apiKey 自身分组
+	//（composite 请求即父分组）计算，明确生图路由则按目标图片分组计算。
 	billingGroup := group
-	if ctxGroup, ok := ctx.Value(ctxkey.Group).(*Group); ok && IsGroupContextValid(ctxGroup) {
+	// Image routing keeps the authenticated source group in ctxkey.Group for
+	// authorization/quota ownership. When the gate is explicitly resolved for
+	// that request's routed target, the target must be the pricing group; do not
+	// let the source context overwrite it. Composite/text requests retain the
+	// historical source-group billing behavior.
+	if routedImageGroup, ok := OpenAIImageGenerationGroupFromContext(ctx); ok && routedImageGroup.ID == *groupID {
+		billingGroup = routedImageGroup
+	} else if ctxGroup, ok := ctx.Value(ctxkey.Group).(*Group); ok && IsGroupContextValid(ctxGroup) {
 		billingGroup = ctxGroup
 	}
 	downstream := billingGroup.RateMultiplier

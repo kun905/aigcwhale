@@ -494,6 +494,16 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 			return nil, err
 		}
 	}
+	// 校验 OpenAI/Codex 图片生成请求的目标分组。
+	imageGenerationGroupID := input.ImageGenerationGroupID
+	if imageGenerationGroupID != nil && *imageGenerationGroupID <= 0 {
+		imageGenerationGroupID = nil
+	}
+	if imageGenerationGroupID != nil {
+		if err := s.validateImageGenerationGroup(ctx, 0, platform, *imageGenerationGroupID); err != nil {
+			return nil, err
+		}
+	}
 	fallbackOnInvalidRequest := input.FallbackGroupIDOnInvalidRequest
 	if fallbackOnInvalidRequest != nil && *fallbackOnInvalidRequest <= 0 {
 		fallbackOnInvalidRequest = nil
@@ -595,6 +605,7 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 		ClaudeCodeOnly:                  input.ClaudeCodeOnly,
 		FallbackGroupID:                 input.FallbackGroupID,
 		FallbackGroupIDOnInvalidRequest: fallbackOnInvalidRequest,
+		ImageGenerationGroupID:          imageGenerationGroupID,
 		ModelRouting:                    input.ModelRouting,
 		MCPXMLInject:                    mcpXMLInject,
 		SupportedModelScopes:            input.SupportedModelScopes,
@@ -738,6 +749,58 @@ func (s *adminServiceImpl) validateFallbackGroupOnInvalidRequest(ctx context.Con
 	}
 	if fallbackGroup.FallbackGroupIDOnInvalidRequest != nil {
 		return fmt.Errorf("fallback group cannot have invalid request fallback configured")
+	}
+	return nil
+}
+
+// validateImageGenerationGroup validates the one-hop target used by OpenAI/Codex
+// image-generation routing. The target must be an active OpenAI group with image
+// generation enabled; chained targets are rejected so request routing is
+// deterministic and cannot silently hop through another group.
+func (s *adminServiceImpl) validateImageGenerationGroup(ctx context.Context, currentGroupID int64, sourcePlatform string, targetGroupID int64) error {
+	if targetGroupID <= 0 {
+		return infraerrors.BadRequest("INVALID_IMAGE_GENERATION_GROUP_ROUTE", "image generation target group ID must be positive")
+	}
+	if sourcePlatform != PlatformOpenAI {
+		return infraerrors.BadRequest("INVALID_IMAGE_GENERATION_GROUP_ROUTE", "image generation routing only supported for openai groups")
+	}
+	if currentGroupID > 0 && currentGroupID == targetGroupID {
+		return infraerrors.BadRequest("INVALID_IMAGE_GENERATION_GROUP_ROUTE", "cannot set self as image generation target group")
+	}
+
+	target, err := s.groupRepo.GetByIDLite(ctx, targetGroupID)
+	if err != nil {
+		if errors.Is(err, ErrGroupNotFound) {
+			return infraerrors.BadRequest("INVALID_IMAGE_GENERATION_GROUP_ROUTE", "image generation target group not found").WithCause(err)
+		}
+		return fmt.Errorf("get image generation target group: %w", err)
+	}
+	if target.Status != StatusActive {
+		return infraerrors.BadRequest("INVALID_IMAGE_GENERATION_GROUP_ROUTE", "image generation target group must be active")
+	}
+	if target.Platform != PlatformOpenAI {
+		return infraerrors.BadRequest("INVALID_IMAGE_GENERATION_GROUP_ROUTE", "image generation target group must be openai platform")
+	}
+	if !target.AllowImageGeneration {
+		return infraerrors.BadRequest("INVALID_IMAGE_GENERATION_GROUP_ROUTE", "image generation target group must allow image generation")
+	}
+	if target.ImageGenerationGroupID != nil {
+		return infraerrors.BadRequest("INVALID_IMAGE_GENERATION_GROUP_ROUTE", "image generation target group cannot route to another image generation group")
+	}
+	if currentGroupID > 0 {
+		referenceRepo, ok := s.groupRepo.(interface {
+			HasImageGenerationRouteTo(context.Context, int64) (bool, error)
+		})
+		if !ok {
+			return fmt.Errorf("group repository does not support image generation route reference checks")
+		}
+		referenced, err := referenceRepo.HasImageGenerationRouteTo(ctx, currentGroupID)
+		if err != nil {
+			return fmt.Errorf("check image generation route references: %w", err)
+		}
+		if referenced {
+			return infraerrors.BadRequest("INVALID_IMAGE_GENERATION_GROUP_ROUTE", "group already used as an image generation target cannot route to another image generation group")
+		}
 	}
 	return nil
 }
@@ -940,6 +1003,31 @@ func (s *adminServiceImpl) UpdateGroup(ctx context.Context, id int64, input *Upd
 			group.FallbackGroupID = nil
 		}
 	}
+	// OpenAI/Codex 图片生成请求目标：nil 表示保持原值，0 或负数表示清除。
+	imageGenerationGroupID := group.ImageGenerationGroupID
+	if input.ImageGenerationGroupID != nil {
+		if *input.ImageGenerationGroupID > 0 {
+			// Full-form clients commonly echo the current value on every save.
+			// Revalidate only when the target actually changes: an existing target
+			// may have become disabled or soft-deleted, and that stale route must
+			// remain removable without blocking unrelated source-group edits.
+			if group.ImageGenerationGroupID == nil || *group.ImageGenerationGroupID != *input.ImageGenerationGroupID {
+				if err := s.validateImageGenerationGroup(ctx, id, group.Platform, *input.ImageGenerationGroupID); err != nil {
+					return nil, err
+				}
+			}
+			imageGenerationGroupID = input.ImageGenerationGroupID
+		} else {
+			imageGenerationGroupID = nil
+		}
+	}
+	// Changing a group away from OpenAI disables this OpenAI-only route.
+	// Clearing it here keeps ordinary platform edits from being blocked by a
+	// stale target that can no longer be used.
+	if group.Platform != PlatformOpenAI {
+		imageGenerationGroupID = nil
+	}
+	group.ImageGenerationGroupID = imageGenerationGroupID
 	fallbackOnInvalidRequest := group.FallbackGroupIDOnInvalidRequest
 	if input.FallbackGroupIDOnInvalidRequest != nil {
 		if *input.FallbackGroupIDOnInvalidRequest > 0 {

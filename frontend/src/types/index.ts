@@ -623,6 +623,8 @@ export interface Group {
 }
 
 export interface AdminGroup extends Group {
+  // 明确图片意图时，使用该启用的 OpenAI 分组账号池；null 表示沿用当前分组。
+  image_generation_group_id?: number | null
   force_openai_fast: boolean
   free_openai_fast: boolean
   model_pricing: import('@/api/admin/channels').ChannelModelPricing[]
@@ -801,6 +803,7 @@ export interface CreateGroupRequest {
   free_openai_fast?: boolean
   model_pricing?: import('@/api/admin/channels').ChannelModelPricing[]
   allow_image_generation?: boolean
+  image_generation_group_id?: number | null
   allow_batch_image_generation?: boolean
   image_rate_independent?: boolean
   image_rate_multiplier?: number
@@ -867,6 +870,7 @@ export interface UpdateGroupRequest {
   free_openai_fast?: boolean
   model_pricing?: import('@/api/admin/channels').ChannelModelPricing[]
   allow_image_generation?: boolean
+  image_generation_group_id?: number | null
   allow_batch_image_generation?: boolean
   image_rate_independent?: boolean
   image_rate_multiplier?: number

@@ -911,6 +911,22 @@
               />
               {{ t(imagePricingI18nKey(createForm.platform, "allowImageGeneration")) }}
             </label>
+            <div
+              v-if="createForm.platform === 'openai' && !authStore.isSimpleMode"
+              class="md:col-span-2"
+            >
+              <label class="input-label">{{ t('admin.groups.imagePricing.routingGroup') }}</label>
+              <Select
+                v-model="createForm.image_generation_group_id"
+                :options="imageRoutingGroupOptionsForCreate"
+                :placeholder="t('admin.groups.imagePricing.routingGroupNone')"
+                :empty-text="t('admin.groups.imagePricing.routingGroupEmpty')"
+                :searchable="'auto'"
+                :loading="imageRoutingGroupsLoading"
+                data-testid="create-image-routing-group"
+              />
+              <p class="input-hint">{{ t('admin.groups.imagePricing.routingGroupHint') }}</p>
+            </div>
             <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
               <input
                 v-model="createForm.image_rate_independent"
@@ -2551,6 +2567,22 @@
               />
               {{ t(imagePricingI18nKey(editForm.platform, "allowImageGeneration")) }}
             </label>
+            <div
+              v-if="editForm.platform === 'openai' && !authStore.isSimpleMode"
+              class="md:col-span-2"
+            >
+              <label class="input-label">{{ t('admin.groups.imagePricing.routingGroup') }}</label>
+              <Select
+                v-model="editForm.image_generation_group_id"
+                :options="imageRoutingGroupOptions"
+                :placeholder="t('admin.groups.imagePricing.routingGroupNone')"
+                :empty-text="t('admin.groups.imagePricing.routingGroupEmpty')"
+                :searchable="'auto'"
+                :loading="imageRoutingGroupsLoading"
+                data-testid="edit-image-routing-group"
+              />
+              <p class="input-hint">{{ t('admin.groups.imagePricing.routingGroupHint') }}</p>
+            </div>
             <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
               <input
                 v-model="editForm.image_rate_independent"
@@ -4369,6 +4401,11 @@ import {
   videoPricingI18nKey,
 } from "./groupsImagePricing";
 import {
+  buildImageRoutingGroupOptions,
+  normalizeImageGenerationGroupID,
+  serializeImageGenerationGroupIDForUpdate,
+} from "./groupsImageRouting";
+import {
   createVideoModelPricesForm,
   grokVideoPriceResolutions,
   serializeVideoModelPrices,
@@ -4827,6 +4864,9 @@ const showSortModal = ref(false);
 const submitting = ref(false);
 const sortSubmitting = ref(false);
 const editingGroup = ref<AdminGroup | null>(null);
+const imageRoutingGroups = ref<AdminGroup[]>([]);
+const imageRoutingGroupsLoading = ref(false);
+let imageRoutingGroupsRequest: Promise<void> | null = null;
 const deletingGroup = ref<AdminGroup | null>(null);
 const duplicatingGroupIds = reactive(new Set<number>());
 const showRateMultipliersModal = ref(false);
@@ -4944,6 +4984,7 @@ const createForm = reactive({
   model_pricing: [] as PricingFormEntry[],
   // 图片生成计费配置
   allow_image_generation: false,
+  image_generation_group_id: null as number | null,
   allow_batch_image_generation: false,
   image_rate_independent: false,
   image_rate_multiplier: 1,
@@ -5309,6 +5350,7 @@ const editForm = reactive({
   model_pricing: [] as PricingFormEntry[],
   // 图片生成计费配置
   allow_image_generation: false,
+  image_generation_group_id: null as number | null,
   allow_batch_image_generation: false,
   image_rate_independent: false,
   image_rate_multiplier: 1,
@@ -5368,6 +5410,29 @@ const editForm = reactive({
   max_reasoning_effort_over_limit: reasoningEffortOverLimitDowngrade,
   reasoning_effort_mappings: [] as ReasoningEffortMappingRow[],
 });
+
+const imageRoutingGroupOptionsForCreate = computed(() =>
+  buildImageRoutingGroupOptions({
+    groups: imageRoutingGroups.value,
+    selectedTargetId: createForm.image_generation_group_id,
+    noneLabel: t("admin.groups.imagePricing.routingGroupNone"),
+    unavailableSuffix: t(
+      "admin.groups.imagePricing.routingGroupUnavailableSuffix",
+    ),
+  }),
+);
+
+const imageRoutingGroupOptions = computed(() =>
+  buildImageRoutingGroupOptions({
+    groups: imageRoutingGroups.value,
+    sourceGroupId: editingGroup.value?.id,
+    selectedTargetId: editForm.image_generation_group_id,
+    noneLabel: t("admin.groups.imagePricing.routingGroupNone"),
+    unavailableSuffix: t(
+      "admin.groups.imagePricing.routingGroupUnavailableSuffix",
+    ),
+  }),
+);
 
 type ImagePricingFormState = {
   platform: GroupPlatform;
@@ -5582,6 +5647,25 @@ const cancelUnsupportedLive = () => {
   pendingLiveForm.value = null;
 };
 
+const loadImageRoutingGroups = async () => {
+  if (authStore.isSimpleMode || imageRoutingGroupsRequest) return imageRoutingGroupsRequest;
+  imageRoutingGroupsLoading.value = true;
+  imageRoutingGroupsRequest = (async () => {
+    try {
+      // This selector must not be limited to the current paginated table page.
+      // Include inactive groups in the response, then filter them in the
+      // computed options so a stale target can be cleared explicitly.
+      imageRoutingGroups.value = await adminAPI.groups.getAllIncludingInactive();
+    } catch (error) {
+      console.error("Error loading image routing groups:", error);
+    } finally {
+      imageRoutingGroupsLoading.value = false;
+      imageRoutingGroupsRequest = null;
+    }
+  })();
+  return imageRoutingGroupsRequest;
+};
+
 const loadGroups = async () => {
   if (abortController) {
     abortController.abort();
@@ -5747,6 +5831,7 @@ const handleSort = (key: string, order: 'asc' | 'desc') => {
 
 const openCreateModal = () => {
   showCreateModal.value = true;
+  void loadImageRoutingGroups();
   loadModelAllowlistCandidates("create", 0, createForm.platform);
 };
 
@@ -5766,6 +5851,7 @@ const closeCreateModal = () => {
   createForm.weekly_limit_usd = null;
   createForm.monthly_limit_usd = null;
   createForm.allow_image_generation = false;
+  createForm.image_generation_group_id = null;
   createForm.allow_batch_image_generation = false;
   createForm.image_rate_independent = false;
   createForm.image_rate_multiplier = 1;
@@ -5892,6 +5978,10 @@ const handleCreateGroup = async () => {
     // 构建请求数据，包含模型路由配置
     const requestData = {
       ...createGroupForm,
+      image_generation_group_id: normalizeImageGenerationGroupID(
+        createForm.platform,
+        createForm.image_generation_group_id,
+      ),
       force_openai_fast: normalizeGroupOpenAIFast(
         createForm.platform,
         createForm.force_openai_fast,
@@ -6024,6 +6114,7 @@ const handleCreateGroup = async () => {
 };
 
 const handleEdit = async (group: AdminGroup) => {
+  void loadImageRoutingGroups();
   editingGroup.value = group;
   editForm.name = group.name;
   editForm.description = group.description || "";
@@ -6041,6 +6132,7 @@ const handleEdit = async (group: AdminGroup) => {
   editForm.free_openai_fast = group.free_openai_fast ?? false;
   editForm.model_pricing = groupPricingFromAPI(group.model_pricing);
   editForm.allow_image_generation = group.allow_image_generation ?? false;
+  editForm.image_generation_group_id = group.image_generation_group_id ?? null;
   editForm.allow_batch_image_generation =
     group.allow_batch_image_generation ?? false;
   editForm.image_rate_independent = group.image_rate_independent ?? false;
@@ -6164,6 +6256,7 @@ const closeEditModal = () => {
   editForm.profit_control_enabled = false;
   editForm.profit_min_margin_percent = 0;
   editForm.profit_safety_buffer_percent = 0;
+  editForm.image_generation_group_id = null;
   editForm.video_rate_independent = false;
   editForm.video_rate_multiplier = 1;
   editForm.video_price_480p = null;
@@ -6227,6 +6320,11 @@ const handleUpdateGroup = async () => {
     // 转换 fallback_group_id: null -> 0 (后端使用 0 表示清除)
     const payload = {
       ...editForm,
+      // 后端更新请求用 0 表示清除；JSON null 会被视为“保持原值”。
+      image_generation_group_id: serializeImageGenerationGroupIDForUpdate(
+        editForm.platform,
+        editForm.image_generation_group_id,
+      ),
       force_openai_fast: normalizeGroupOpenAIFast(
         editForm.platform,
         editForm.force_openai_fast,
@@ -6656,6 +6754,10 @@ watch(
 watch(
   () => createForm.platform,
   (newVal) => {
+    createForm.image_generation_group_id = normalizeImageGenerationGroupID(
+      newVal,
+      createForm.image_generation_group_id,
+    );
     if (!["anthropic", "antigravity"].includes(newVal)) {
       createForm.fallback_group_id_on_invalid_request = null;
     }
@@ -6713,6 +6815,10 @@ watch(
 watch(
   () => editForm.platform,
   (newVal) => {
+    editForm.image_generation_group_id = normalizeImageGenerationGroupID(
+      newVal,
+      editForm.image_generation_group_id,
+    );
     if (!["anthropic", "antigravity"].includes(newVal)) {
       editForm.fallback_group_id_on_invalid_request = null;
     }

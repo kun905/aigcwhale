@@ -132,6 +132,7 @@ func createGroupRecord(ctx context.Context, client *dbent.Client, groupIn *servi
 		SetClaudeCodeOnly(groupIn.ClaudeCodeOnly).
 		SetNillableFallbackGroupID(groupIn.FallbackGroupID).
 		SetNillableFallbackGroupIDOnInvalidRequest(groupIn.FallbackGroupIDOnInvalidRequest).
+		SetNillableImageGenerationGroupID(groupIn.ImageGenerationGroupID).
 		SetModelRoutingEnabled(groupIn.ModelRoutingEnabled).
 		SetMcpXMLInject(groupIn.MCPXMLInject).
 		SetAllowMessagesDispatch(groupIn.AllowMessagesDispatch).
@@ -277,6 +278,19 @@ func (r *groupRepository) GetByIDLite(ctx context.Context, id int64) (*service.G
 	return groupEntityToService(m), nil
 }
 
+// HasImageGenerationRouteTo reports whether a live source group already routes
+// image-generation requests to targetGroupID. A group used as a one-hop target
+// must remain terminal, so the admin service checks this before assigning that
+// group its own target.
+func (r *groupRepository) HasImageGenerationRouteTo(ctx context.Context, targetGroupID int64) (bool, error) {
+	if targetGroupID <= 0 {
+		return false, nil
+	}
+	return r.client.Group.Query().
+		Where(group.ImageGenerationGroupIDEQ(targetGroupID)).
+		Exist(ctx)
+}
+
 func (r *groupRepository) Update(ctx context.Context, groupIn *service.Group) error {
 	modelPricing, err := json.Marshal(groupIn.ModelPricing)
 	if err != nil {
@@ -419,6 +433,12 @@ func (r *groupRepository) Update(ctx context.Context, groupIn *service.Group) er
 		builder = builder.SetFallbackGroupIDOnInvalidRequest(*groupIn.FallbackGroupIDOnInvalidRequest)
 	} else {
 		builder = builder.ClearFallbackGroupIDOnInvalidRequest()
+	}
+	// 处理 ImageGenerationGroupID：nil 时清除，否则设置。
+	if groupIn.ImageGenerationGroupID != nil {
+		builder = builder.SetImageGenerationGroupID(*groupIn.ImageGenerationGroupID)
+	} else {
+		builder = builder.ClearImageGenerationGroupID()
 	}
 
 	// 处理 ModelRouting：nil 时清除，否则设置

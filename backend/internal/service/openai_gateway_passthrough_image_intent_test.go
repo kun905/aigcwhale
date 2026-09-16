@@ -56,4 +56,31 @@ func TestOpenAIGatewayService_APIKeyPassthrough_ImageIntentPreservesGateAndBilli
 		require.Equal(t, "2K", result.ImageSize)
 		require.Equal(t, "2048x1152", result.ImageInputSize)
 	})
+
+	t.Run("routed target allows disabled source group", func(t *testing.T) {
+		upstream := &httpUpstreamRecorder{resp: &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"output":[{"id":"ig_routed","type":"image_generation_call","result":"final-image","size":"2048x1152"}],"usage":{"input_tokens":1,"output_tokens":2}}`,
+			)),
+		}}
+		svc := newOpenAIImageGenerationControlTestService(upstream)
+		c, recorder := newOpenAIImageGenerationControlTestContext(false, "curl/8.0")
+		target := newOpenAIImageGenerationRoutingTargetForTest(5252, true)
+		routedCtx := WithOpenAIImageGenerationGroup(context.Background(), target)
+		c.Request = c.Request.WithContext(routedCtx)
+		account := newOpenAIImageGenerationControlTestAccount()
+		account.Extra = map[string]any{"openai_passthrough": true}
+
+		result, err := svc.Forward(routedCtx, c, account, body)
+
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		require.Equal(t, http.StatusOK, recorder.Code)
+		require.NotNil(t, upstream.lastReq)
+		require.Equal(t, 1, result.ImageCount)
+		require.Equal(t, "gpt-image-2", result.BillingModel)
+		require.Equal(t, "2K", result.ImageSize)
+	})
 }

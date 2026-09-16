@@ -96,6 +96,20 @@ func TestAuthCacheInvalidationTriggers_CoverSecurityMutationsOnly(t *testing.T) 
 	require.NoError(t, err)
 	require.Equal(t, 1, count(), "image-generation permission changes must enqueue bound keys")
 	clear()
+	// The routing target is part of the API-key auth snapshot.  A direct SQL
+	// edit must invalidate the same bound keys even when it bypasses the admin
+	// service's explicit invalidation call.
+	target := mustCreateGroup(t, integrationEntClient, &service.Group{
+		Name:     fmt.Sprintf("auth-outbox-target-%d", suffix),
+		Platform: service.PlatformOpenAI,
+	})
+	t.Cleanup(func() {
+		_, _ = integrationDB.ExecContext(ctx, "DELETE FROM groups WHERE id = $1", target.ID)
+	})
+	_, err = integrationDB.ExecContext(ctx, "UPDATE groups SET image_generation_group_id = $1 WHERE id = $2", target.ID, group.ID)
+	require.NoError(t, err)
+	require.Equal(t, 1, count(), "image-generation routing changes must enqueue bound keys")
+	clear()
 	_, err = integrationDB.ExecContext(ctx, "UPDATE groups SET status = 'disabled' WHERE id = $1", group.ID)
 	require.NoError(t, err)
 	require.Equal(t, 1, count(), "group disable must enqueue bound keys")

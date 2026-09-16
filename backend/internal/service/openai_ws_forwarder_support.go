@@ -433,6 +433,24 @@ func getOpenAIGroupIDFromContext(c *gin.Context) int64 {
 	if c == nil {
 		return 0
 	}
+	// Explicit image requests may use a different account pool while the API
+	// key remains bound to the authenticated source group. Response/session
+	// affinity is an account-pool concern, so key it by the routed image group.
+	if c.Request != nil {
+		if targetID, ok := OpenAIImageGenerationGroupIDFromContext(c.Request.Context()); ok && targetID != nil {
+			return *targetID
+		}
+	}
+	return getOpenAIAuthenticatedGroupIDFromContext(c)
+}
+
+// getOpenAIAuthenticatedGroupIDFromContext always returns the source group
+// carried by the API key. Tenant authorization and quota ownership must remain
+// keyed to this group even when image account affinity uses a routed target.
+func getOpenAIAuthenticatedGroupIDFromContext(c *gin.Context) int64 {
+	if c == nil {
+		return 0
+	}
 	value, exists := c.Get("api_key")
 	if !exists {
 		return 0

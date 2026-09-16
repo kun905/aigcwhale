@@ -59,6 +59,12 @@ func TestMigrationsRunner_IsIdempotent_AndSchemaIsUpToDate(t *testing.T) {
 	requireColumn(t, tx, "groups", "allow_live", "boolean", 0, false)
 	requireColumn(t, tx, "groups", "force_openai_fast", "boolean", 0, false)
 	requireColumn(t, tx, "groups", "free_openai_fast", "boolean", 0, false)
+	// Image-generation routing is an optional self-reference.  Keep the
+	// database contract explicit: it must remain nullable, point back to
+	// groups, and clear itself when the target is deleted.
+	requireColumn(t, tx, "groups", "image_generation_group_id", "bigint", 0, true)
+	requireIndex(t, tx, "groups", "idx_groups_image_generation_group_id")
+	requireForeignKeyOnDelete(t, tx, "groups", "image_generation_group_id", "groups", "SET NULL")
 
 	// api_keys: key length should be 128
 	requireColumn(t, tx, "api_keys", "key", "character varying", 128, false)

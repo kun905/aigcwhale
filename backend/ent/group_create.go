@@ -622,6 +622,20 @@ func (_c *GroupCreate) SetNillableFallbackGroupIDOnInvalidRequest(v *int64) *Gro
 	return _c
 }
 
+// SetImageGenerationGroupID sets the "image_generation_group_id" field.
+func (_c *GroupCreate) SetImageGenerationGroupID(v int64) *GroupCreate {
+	_c.mutation.SetImageGenerationGroupID(v)
+	return _c
+}
+
+// SetNillableImageGenerationGroupID sets the "image_generation_group_id" field if the given value is not nil.
+func (_c *GroupCreate) SetNillableImageGenerationGroupID(v *int64) *GroupCreate {
+	if v != nil {
+		_c.SetImageGenerationGroupID(*v)
+	}
+	return _c
+}
+
 // SetModelRouting sets the "model_routing" field.
 func (_c *GroupCreate) SetModelRouting(v map[string][]int64) *GroupCreate {
 	_c.mutation.SetModelRouting(v)
@@ -1620,6 +1634,10 @@ func (_c *GroupCreate) createSpec() (*Group, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.FallbackGroupIDOnInvalidRequest(); ok {
 		_spec.SetField(group.FieldFallbackGroupIDOnInvalidRequest, field.TypeInt64, value)
 		_node.FallbackGroupIDOnInvalidRequest = &value
+	}
+	if value, ok := _c.mutation.ImageGenerationGroupID(); ok {
+		_spec.SetField(group.FieldImageGenerationGroupID, field.TypeInt64, value)
+		_node.ImageGenerationGroupID = &value
 	}
 	if value, ok := _c.mutation.ModelRouting(); ok {
 		_spec.SetField(group.FieldModelRouting, field.TypeJSON, value)
@@ -2624,6 +2642,30 @@ func (u *GroupUpsert) AddFallbackGroupIDOnInvalidRequest(v int64) *GroupUpsert {
 // ClearFallbackGroupIDOnInvalidRequest clears the value of the "fallback_group_id_on_invalid_request" field.
 func (u *GroupUpsert) ClearFallbackGroupIDOnInvalidRequest() *GroupUpsert {
 	u.SetNull(group.FieldFallbackGroupIDOnInvalidRequest)
+	return u
+}
+
+// SetImageGenerationGroupID sets the "image_generation_group_id" field.
+func (u *GroupUpsert) SetImageGenerationGroupID(v int64) *GroupUpsert {
+	u.Set(group.FieldImageGenerationGroupID, v)
+	return u
+}
+
+// UpdateImageGenerationGroupID sets the "image_generation_group_id" field to the value that was provided on create.
+func (u *GroupUpsert) UpdateImageGenerationGroupID() *GroupUpsert {
+	u.SetExcluded(group.FieldImageGenerationGroupID)
+	return u
+}
+
+// AddImageGenerationGroupID adds v to the "image_generation_group_id" field.
+func (u *GroupUpsert) AddImageGenerationGroupID(v int64) *GroupUpsert {
+	u.Add(group.FieldImageGenerationGroupID, v)
+	return u
+}
+
+// ClearImageGenerationGroupID clears the value of the "image_generation_group_id" field.
+func (u *GroupUpsert) ClearImageGenerationGroupID() *GroupUpsert {
+	u.SetNull(group.FieldImageGenerationGroupID)
 	return u
 }
 
@@ -3855,6 +3897,34 @@ func (u *GroupUpsertOne) UpdateFallbackGroupIDOnInvalidRequest() *GroupUpsertOne
 func (u *GroupUpsertOne) ClearFallbackGroupIDOnInvalidRequest() *GroupUpsertOne {
 	return u.Update(func(s *GroupUpsert) {
 		s.ClearFallbackGroupIDOnInvalidRequest()
+	})
+}
+
+// SetImageGenerationGroupID sets the "image_generation_group_id" field.
+func (u *GroupUpsertOne) SetImageGenerationGroupID(v int64) *GroupUpsertOne {
+	return u.Update(func(s *GroupUpsert) {
+		s.SetImageGenerationGroupID(v)
+	})
+}
+
+// AddImageGenerationGroupID adds v to the "image_generation_group_id" field.
+func (u *GroupUpsertOne) AddImageGenerationGroupID(v int64) *GroupUpsertOne {
+	return u.Update(func(s *GroupUpsert) {
+		s.AddImageGenerationGroupID(v)
+	})
+}
+
+// UpdateImageGenerationGroupID sets the "image_generation_group_id" field to the value that was provided on create.
+func (u *GroupUpsertOne) UpdateImageGenerationGroupID() *GroupUpsertOne {
+	return u.Update(func(s *GroupUpsert) {
+		s.UpdateImageGenerationGroupID()
+	})
+}
+
+// ClearImageGenerationGroupID clears the value of the "image_generation_group_id" field.
+func (u *GroupUpsertOne) ClearImageGenerationGroupID() *GroupUpsertOne {
+	return u.Update(func(s *GroupUpsert) {
+		s.ClearImageGenerationGroupID()
 	})
 }
 
@@ -5301,6 +5371,34 @@ func (u *GroupUpsertBulk) UpdateFallbackGroupIDOnInvalidRequest() *GroupUpsertBu
 func (u *GroupUpsertBulk) ClearFallbackGroupIDOnInvalidRequest() *GroupUpsertBulk {
 	return u.Update(func(s *GroupUpsert) {
 		s.ClearFallbackGroupIDOnInvalidRequest()
+	})
+}
+
+// SetImageGenerationGroupID sets the "image_generation_group_id" field.
+func (u *GroupUpsertBulk) SetImageGenerationGroupID(v int64) *GroupUpsertBulk {
+	return u.Update(func(s *GroupUpsert) {
+		s.SetImageGenerationGroupID(v)
+	})
+}
+
+// AddImageGenerationGroupID adds v to the "image_generation_group_id" field.
+func (u *GroupUpsertBulk) AddImageGenerationGroupID(v int64) *GroupUpsertBulk {
+	return u.Update(func(s *GroupUpsert) {
+		s.AddImageGenerationGroupID(v)
+	})
+}
+
+// UpdateImageGenerationGroupID sets the "image_generation_group_id" field to the value that was provided on create.
+func (u *GroupUpsertBulk) UpdateImageGenerationGroupID() *GroupUpsertBulk {
+	return u.Update(func(s *GroupUpsert) {
+		s.UpdateImageGenerationGroupID()
+	})
+}
+
+// ClearImageGenerationGroupID clears the value of the "image_generation_group_id" field.
+func (u *GroupUpsertBulk) ClearImageGenerationGroupID() *GroupUpsertBulk {
+	return u.Update(func(s *GroupUpsert) {
+		s.ClearImageGenerationGroupID()
 	})
 }
 

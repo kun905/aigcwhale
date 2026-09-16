@@ -265,6 +265,11 @@ func FallbackGroupIDOnInvalidRequest(v int64) predicate.Group {
 	return predicate.Group(sql.FieldEQ(FieldFallbackGroupIDOnInvalidRequest, v))
 }
 
+// ImageGenerationGroupID applies equality check predicate on the "image_generation_group_id" field. It's identical to ImageGenerationGroupIDEQ.
+func ImageGenerationGroupID(v int64) predicate.Group {
+	return predicate.Group(sql.FieldEQ(FieldImageGenerationGroupID, v))
+}
+
 // ModelRoutingEnabled applies equality check predicate on the "model_routing_enabled" field. It's identical to ModelRoutingEnabledEQ.
 func ModelRoutingEnabled(v bool) predicate.Group {
 	return predicate.Group(sql.FieldEQ(FieldModelRoutingEnabled, v))
@@ -2193,6 +2198,56 @@ func FallbackGroupIDOnInvalidRequestIsNil() predicate.Group {
 // FallbackGroupIDOnInvalidRequestNotNil applies the NotNil predicate on the "fallback_group_id_on_invalid_request" field.
 func FallbackGroupIDOnInvalidRequestNotNil() predicate.Group {
 	return predicate.Group(sql.FieldNotNull(FieldFallbackGroupIDOnInvalidRequest))
+}
+
+// ImageGenerationGroupIDEQ applies the EQ predicate on the "image_generation_group_id" field.
+func ImageGenerationGroupIDEQ(v int64) predicate.Group {
+	return predicate.Group(sql.FieldEQ(FieldImageGenerationGroupID, v))
+}
+
+// ImageGenerationGroupIDNEQ applies the NEQ predicate on the "image_generation_group_id" field.
+func ImageGenerationGroupIDNEQ(v int64) predicate.Group {
+	return predicate.Group(sql.FieldNEQ(FieldImageGenerationGroupID, v))
+}
+
+// ImageGenerationGroupIDIn applies the In predicate on the "image_generation_group_id" field.
+func ImageGenerationGroupIDIn(vs ...int64) predicate.Group {
+	return predicate.Group(sql.FieldIn(FieldImageGenerationGroupID, vs...))
+}
+
+// ImageGenerationGroupIDNotIn applies the NotIn predicate on the "image_generation_group_id" field.
+func ImageGenerationGroupIDNotIn(vs ...int64) predicate.Group {
+	return predicate.Group(sql.FieldNotIn(FieldImageGenerationGroupID, vs...))
+}
+
+// ImageGenerationGroupIDGT applies the GT predicate on the "image_generation_group_id" field.
+func ImageGenerationGroupIDGT(v int64) predicate.Group {
+	return predicate.Group(sql.FieldGT(FieldImageGenerationGroupID, v))
+}
+
+// ImageGenerationGroupIDGTE applies the GTE predicate on the "image_generation_group_id" field.
+func ImageGenerationGroupIDGTE(v int64) predicate.Group {
+	return predicate.Group(sql.FieldGTE(FieldImageGenerationGroupID, v))
+}
+
+// ImageGenerationGroupIDLT applies the LT predicate on the "image_generation_group_id" field.
+func ImageGenerationGroupIDLT(v int64) predicate.Group {
+	return predicate.Group(sql.FieldLT(FieldImageGenerationGroupID, v))
+}
+
+// ImageGenerationGroupIDLTE applies the LTE predicate on the "image_generation_group_id" field.
+func ImageGenerationGroupIDLTE(v int64) predicate.Group {
+	return predicate.Group(sql.FieldLTE(FieldImageGenerationGroupID, v))
+}
+
+// ImageGenerationGroupIDIsNil applies the IsNil predicate on the "image_generation_group_id" field.
+func ImageGenerationGroupIDIsNil() predicate.Group {
+	return predicate.Group(sql.FieldIsNull(FieldImageGenerationGroupID))
+}
+
+// ImageGenerationGroupIDNotNil applies the NotNil predicate on the "image_generation_group_id" field.
+func ImageGenerationGroupIDNotNil() predicate.Group {
+	return predicate.Group(sql.FieldNotNull(FieldImageGenerationGroupID))
 }
 
 // ModelRoutingIsNil applies the IsNil predicate on the "model_routing" field.

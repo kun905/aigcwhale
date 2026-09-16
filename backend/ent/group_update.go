@@ -888,6 +888,33 @@ func (_u *GroupUpdate) ClearFallbackGroupIDOnInvalidRequest() *GroupUpdate {
 	return _u
 }
 
+// SetImageGenerationGroupID sets the "image_generation_group_id" field.
+func (_u *GroupUpdate) SetImageGenerationGroupID(v int64) *GroupUpdate {
+	_u.mutation.ResetImageGenerationGroupID()
+	_u.mutation.SetImageGenerationGroupID(v)
+	return _u
+}
+
+// SetNillableImageGenerationGroupID sets the "image_generation_group_id" field if the given value is not nil.
+func (_u *GroupUpdate) SetNillableImageGenerationGroupID(v *int64) *GroupUpdate {
+	if v != nil {
+		_u.SetImageGenerationGroupID(*v)
+	}
+	return _u
+}
+
+// AddImageGenerationGroupID adds value to the "image_generation_group_id" field.
+func (_u *GroupUpdate) AddImageGenerationGroupID(v int64) *GroupUpdate {
+	_u.mutation.AddImageGenerationGroupID(v)
+	return _u
+}
+
+// ClearImageGenerationGroupID clears the value of the "image_generation_group_id" field.
+func (_u *GroupUpdate) ClearImageGenerationGroupID() *GroupUpdate {
+	_u.mutation.ClearImageGenerationGroupID()
+	return _u
+}
+
 // SetModelRouting sets the "model_routing" field.
 func (_u *GroupUpdate) SetModelRouting(v map[string][]int64) *GroupUpdate {
 	_u.mutation.SetModelRouting(v)
@@ -1825,6 +1852,15 @@ func (_u *GroupUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.FallbackGroupIDOnInvalidRequestCleared() {
 		_spec.ClearField(group.FieldFallbackGroupIDOnInvalidRequest, field.TypeInt64)
+	}
+	if value, ok := _u.mutation.ImageGenerationGroupID(); ok {
+		_spec.SetField(group.FieldImageGenerationGroupID, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedImageGenerationGroupID(); ok {
+		_spec.AddField(group.FieldImageGenerationGroupID, field.TypeInt64, value)
+	}
+	if _u.mutation.ImageGenerationGroupIDCleared() {
+		_spec.ClearField(group.FieldImageGenerationGroupID, field.TypeInt64)
 	}
 	if value, ok := _u.mutation.ModelRouting(); ok {
 		_spec.SetField(group.FieldModelRouting, field.TypeJSON, value)
@@ -3082,6 +3118,33 @@ func (_u *GroupUpdateOne) ClearFallbackGroupIDOnInvalidRequest() *GroupUpdateOne
 	return _u
 }
 
+// SetImageGenerationGroupID sets the "image_generation_group_id" field.
+func (_u *GroupUpdateOne) SetImageGenerationGroupID(v int64) *GroupUpdateOne {
+	_u.mutation.ResetImageGenerationGroupID()
+	_u.mutation.SetImageGenerationGroupID(v)
+	return _u
+}
+
+// SetNillableImageGenerationGroupID sets the "image_generation_group_id" field if the given value is not nil.
+func (_u *GroupUpdateOne) SetNillableImageGenerationGroupID(v *int64) *GroupUpdateOne {
+	if v != nil {
+		_u.SetImageGenerationGroupID(*v)
+	}
+	return _u
+}
+
+// AddImageGenerationGroupID adds value to the "image_generation_group_id" field.
+func (_u *GroupUpdateOne) AddImageGenerationGroupID(v int64) *GroupUpdateOne {
+	_u.mutation.AddImageGenerationGroupID(v)
+	return _u
+}
+
+// ClearImageGenerationGroupID clears the value of the "image_generation_group_id" field.
+func (_u *GroupUpdateOne) ClearImageGenerationGroupID() *GroupUpdateOne {
+	_u.mutation.ClearImageGenerationGroupID()
+	return _u
+}
+
 // SetModelRouting sets the "model_routing" field.
 func (_u *GroupUpdateOne) SetModelRouting(v map[string][]int64) *GroupUpdateOne {
 	_u.mutation.SetModelRouting(v)
@@ -4049,6 +4112,15 @@ func (_u *GroupUpdateOne) sqlSave(ctx context.Context) (_node *Group, err error)
 	}
 	if _u.mutation.FallbackGroupIDOnInvalidRequestCleared() {
 		_spec.ClearField(group.FieldFallbackGroupIDOnInvalidRequest, field.TypeInt64)
+	}
+	if value, ok := _u.mutation.ImageGenerationGroupID(); ok {
+		_spec.SetField(group.FieldImageGenerationGroupID, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedImageGenerationGroupID(); ok {
+		_spec.AddField(group.FieldImageGenerationGroupID, field.TypeInt64, value)
+	}
+	if _u.mutation.ImageGenerationGroupIDCleared() {
+		_spec.ClearField(group.FieldImageGenerationGroupID, field.TypeInt64)
 	}
 	if value, ok := _u.mutation.ModelRouting(); ok {
 		_spec.SetField(group.FieldModelRouting, field.TypeJSON, value)

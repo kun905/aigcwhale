@@ -207,6 +207,22 @@ type openAIUserGroupRateRepoStub struct {
 	calls int
 }
 
+type openAIUserGroupRateByGroupRepoStub struct {
+	UserGroupRateRepository
+
+	rates map[int64]float64
+	calls []int64
+}
+
+func (s *openAIUserGroupRateByGroupRepoStub) GetByUserAndGroup(_ context.Context, _, groupID int64) (*float64, error) {
+	s.calls = append(s.calls, groupID)
+	rate, ok := s.rates[groupID]
+	if !ok {
+		return nil, nil
+	}
+	return &rate, nil
+}
+
 func (s *openAIUserGroupRateRepoStub) GetByUserAndGroup(ctx context.Context, userID, groupID int64) (*float64, error) {
 	s.calls++
 	if s.err != nil {
@@ -2336,6 +2352,468 @@ func TestOpenAIGatewayServiceRecordUsage_ImageIndependentMultiplierUsesImageRate
 	require.InDelta(t, 1.0, usageRepo.lastLog.RateMultiplier, 1e-12)
 	require.NotNil(t, usageRepo.lastLog.BillingMode)
 	require.Equal(t, string(BillingModeImage), *usageRepo.lastLog.BillingMode)
+}
+
+func TestOpenAIGatewayServiceRecordUsage_RoutedImageUsesTargetPricingButSourceOwnership(t *testing.T) {
+	sourceGroupID := int64(140)
+	targetGroupID := int64(141)
+	sourceImagePrice := 0.91
+	targetImagePrice := 0.04
+	rateRepo := &openAIUserGroupRateByGroupRepoStub{rates: map[int64]float64{
+		sourceGroupID: 0.25,
+		targetGroupID: 0.50,
+	}}
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: true}}
+	quotaSvc := &openAIRecordUsageAPIKeyQuotaStub{}
+	svc := newOpenAIRecordUsageServiceWithBillingRepoForTest(
+		usageRepo,
+		billingRepo,
+		&openAIRecordUsageUserRepoStub{},
+		&openAIRecordUsageSubRepoStub{},
+		rateRepo,
+	)
+
+	sourceGroup := &Group{
+		ID:               sourceGroupID,
+		Platform:         PlatformOpenAI,
+		RateMultiplier:   0.15,
+		SubscriptionType: SubscriptionTypeSubscription,
+		ImagePrice1K:     &sourceImagePrice,
+	}
+	targetGroup := &Group{
+		ID:                   targetGroupID,
+		Platform:             PlatformOpenAI,
+		RateMultiplier:       0.40,
+		ImageRateIndependent: false,
+		ImagePrice1K:         &targetImagePrice,
+	}
+	subscription := &UserSubscription{ID: 9141}
+
+	err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{
+			RequestID:  "resp_routed_image_target_pricing",
+			Model:      "gpt-image-2",
+			ImageCount: 2,
+			ImageSize:  ImageBillingSize1K,
+			Duration:   time.Second,
+		},
+		APIKey: &APIKey{
+			ID:      10140,
+			GroupID: i64p(sourceGroupID),
+			Group:   sourceGroup,
+			Quota:   100,
+		},
+		User:          &User{ID: 20140},
+		Account:       &Account{ID: 30140, Type: AccountTypeAPIKey, Platform: PlatformOpenAI},
+		Subscription:  subscription,
+		PricingGroup:  targetGroup,
+		APIKeyService: quotaSvc,
+		QuotaPlatform: PlatformOpenAI,
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, usageRepo.lastLog)
+	require.InDelta(t, 0.08, usageRepo.lastLog.TotalCost, 1e-12)
+	require.InDelta(t, 0.04, usageRepo.lastLog.ActualCost, 1e-12)
+	require.InDelta(t, 0.50, usageRepo.lastLog.RateMultiplier, 1e-12)
+	require.Equal(t, i64p(sourceGroupID), usageRepo.lastLog.GroupID, "usage attribution must remain on the source group")
+	require.Equal(t, BillingTypeSubscription, usageRepo.lastLog.BillingType, "source group controls subscription billing")
+	require.Equal(t, &subscription.ID, usageRepo.lastLog.SubscriptionID)
+	require.ElementsMatch(t, []int64{sourceGroupID, targetGroupID}, rateRepo.calls)
+
+	require.NotNil(t, billingRepo.lastCmd)
+	require.Equal(t, int64(10140), billingRepo.lastCmd.APIKeyID)
+	require.Equal(t, int64(20140), billingRepo.lastCmd.UserID)
+	require.Equal(t, &subscription.ID, billingRepo.lastCmd.SubscriptionID)
+	require.InDelta(t, 0.04, billingRepo.lastCmd.SubscriptionCost, 1e-12)
+	require.Zero(t, billingRepo.lastCmd.BalanceCost)
+	require.InDelta(t, 0.04, billingRepo.lastCmd.APIKeyQuotaCost, 1e-12)
+}
+
+func TestOpenAIGatewayServiceRecordUsage_SourcePricingGroupKeepsLegacyImagePath(t *testing.T) {
+	groupID := int64(1411)
+	imagePrice := 0.05
+	rateRepo := &openAIUserGroupRateByGroupRepoStub{rates: map[int64]float64{groupID: 0.40}}
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	svc := newOpenAIRecordUsageServiceForTest(
+		usageRepo,
+		&openAIRecordUsageUserRepoStub{},
+		&openAIRecordUsageSubRepoStub{},
+		rateRepo,
+	)
+	group := &Group{
+		ID:             groupID,
+		Platform:       PlatformOpenAI,
+		RateMultiplier: 0.30,
+		ImagePrice1K:   &imagePrice,
+	}
+
+	err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{
+			RequestID:  "resp_source_image_pricing_group",
+			Model:      "gpt-image-2",
+			ImageCount: 1,
+			ImageSize:  ImageBillingSize1K,
+			Duration:   time.Second,
+		},
+		APIKey:  &APIKey{ID: 101411, GroupID: i64p(groupID), Group: group},
+		User:    &User{ID: 201411},
+		Account: &Account{ID: 301411, Platform: PlatformOpenAI},
+		// Handlers pass their permission group even when no route is configured.
+		// The identical source group must remain the exact legacy pricing path.
+		PricingGroup: group,
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, usageRepo.lastLog)
+	require.InDelta(t, 0.05, usageRepo.lastLog.TotalCost, 1e-12)
+	require.InDelta(t, 0.02, usageRepo.lastLog.ActualCost, 1e-12)
+	require.InDelta(t, 0.40, usageRepo.lastLog.RateMultiplier, 1e-12)
+	require.Equal(t, []int64{groupID}, rateRepo.calls, "the same source group must not trigger a second multiplier lookup")
+}
+
+func TestOpenAIGatewayServiceRecordUsage_RoutedImageZeroOutputUsesTargetTokenPricingAndAccountStats(t *testing.T) {
+	sourceGroupID := int64(142)
+	targetGroupID := int64(143)
+	model := "gpt-image-zero-output"
+	sourceInputPrice := 1e-3
+	sourceOutputPrice := 2e-3
+	targetInputPrice := 1e-6
+	targetOutputPrice := 2e-6
+	sourceStatsInputPrice := 9e-4
+	sourceStatsOutputPrice := 8e-4
+	targetStatsInputPrice := 3e-6
+	targetStatsOutputPrice := 4e-6
+	rateRepo := &openAIUserGroupRateByGroupRepoStub{rates: map[int64]float64{
+		sourceGroupID: 0.25,
+		targetGroupID: 0.50,
+	}}
+
+	cache := newEmptyChannelCache()
+	cache.pricingByGroupModel[channelModelKey{groupID: sourceGroupID, platform: PlatformOpenAI, model: model}] = &ChannelModelPricing{
+		BillingMode: BillingModeToken,
+		InputPrice:  &sourceInputPrice,
+		OutputPrice: &sourceOutputPrice,
+	}
+	cache.pricingByGroupModel[channelModelKey{groupID: targetGroupID, platform: PlatformOpenAI, model: model}] = &ChannelModelPricing{
+		BillingMode: BillingModeToken,
+		InputPrice:  &targetInputPrice,
+		OutputPrice: &targetOutputPrice,
+	}
+	cache.channelByGroupID[sourceGroupID] = &Channel{
+		ID:     sourceGroupID,
+		Status: StatusActive,
+		AccountStatsPricingRules: []AccountStatsPricingRule{{
+			GroupIDs: []int64{sourceGroupID},
+			Pricing: []ChannelModelPricing{{
+				Platform:    PlatformOpenAI,
+				Models:      []string{model},
+				BillingMode: BillingModeToken,
+				InputPrice:  &sourceStatsInputPrice,
+				OutputPrice: &sourceStatsOutputPrice,
+			}},
+		}},
+	}
+	cache.channelByGroupID[targetGroupID] = &Channel{
+		ID:     targetGroupID,
+		Status: StatusActive,
+		AccountStatsPricingRules: []AccountStatsPricingRule{{
+			GroupIDs: []int64{targetGroupID},
+			Pricing: []ChannelModelPricing{{
+				Platform:    PlatformOpenAI,
+				Models:      []string{model},
+				BillingMode: BillingModeToken,
+				InputPrice:  &targetStatsInputPrice,
+				OutputPrice: &targetStatsOutputPrice,
+			}},
+		}},
+	}
+	cache.groupPlatform[sourceGroupID] = PlatformOpenAI
+	cache.groupPlatform[targetGroupID] = PlatformOpenAI
+	cache.loadedAt = time.Now()
+	channelService := &ChannelService{}
+	channelService.cache.Store(cache)
+
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: true}}
+	quotaSvc := &openAIRecordUsageAPIKeyQuotaStub{}
+	svc := newOpenAIRecordUsageServiceWithBillingRepoForTest(
+		usageRepo,
+		billingRepo,
+		&openAIRecordUsageUserRepoStub{},
+		&openAIRecordUsageSubRepoStub{},
+		rateRepo,
+	)
+	svc.channelService = channelService
+	svc.resolver = NewModelPricingResolver(channelService, svc.billingService)
+	subscription := &UserSubscription{ID: 9142}
+
+	err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{
+			RequestID:     "resp_routed_image_zero_output",
+			Model:         model,
+			UpstreamModel: model,
+			Usage: OpenAIUsage{
+				InputTokens:  100,
+				OutputTokens: 50,
+			},
+			ImageCount: 0,
+			Duration:   time.Second,
+		},
+		APIKey: &APIKey{
+			ID:      10142,
+			GroupID: i64p(sourceGroupID),
+			Group: &Group{
+				ID:               sourceGroupID,
+				Platform:         PlatformOpenAI,
+				RateMultiplier:   0.20,
+				SubscriptionType: SubscriptionTypeSubscription,
+			},
+			Quota: 100,
+		},
+		User:         &User{ID: 20142},
+		Account:      &Account{ID: 30142, Platform: PlatformOpenAI},
+		Subscription: subscription,
+		PricingGroup: &Group{
+			ID:             targetGroupID,
+			Platform:       PlatformOpenAI,
+			RateMultiplier: 0.40,
+		},
+		APIKeyService: quotaSvc,
+		QuotaPlatform: PlatformOpenAI,
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, usageRepo.lastLog)
+	// Target raw channel cost: 100*1e-6 + 50*2e-6 = 0.0002.
+	require.InDelta(t, 0.0002, usageRepo.lastLog.TotalCost, 1e-12)
+	require.InDelta(t, 0.0001, usageRepo.lastLog.ActualCost, 1e-12)
+	require.InDelta(t, 0.50, usageRepo.lastLog.RateMultiplier, 1e-12)
+	require.Zero(t, usageRepo.lastLog.ImageCount)
+	require.Equal(t, i64p(sourceGroupID), usageRepo.lastLog.GroupID, "usage ownership stays on the source group")
+	require.Equal(t, BillingTypeSubscription, usageRepo.lastLog.BillingType)
+	require.Equal(t, &subscription.ID, usageRepo.lastLog.SubscriptionID)
+	require.ElementsMatch(t, []int64{sourceGroupID, targetGroupID}, rateRepo.calls)
+	require.NotNil(t, usageRepo.lastLog.AccountStatsCost)
+	// Target account-stats rule: 100*3e-6 + 50*4e-6 = 0.0005.
+	require.InDelta(t, 0.0005, *usageRepo.lastLog.AccountStatsCost, 1e-12)
+
+	require.NotNil(t, billingRepo.lastCmd)
+	require.Equal(t, int64(10142), billingRepo.lastCmd.APIKeyID)
+	require.Equal(t, int64(20142), billingRepo.lastCmd.UserID)
+	require.Equal(t, &subscription.ID, billingRepo.lastCmd.SubscriptionID)
+	require.InDelta(t, 0.0001, billingRepo.lastCmd.SubscriptionCost, 1e-12)
+	require.InDelta(t, 0.0001, billingRepo.lastCmd.APIKeyQuotaCost, 1e-12)
+}
+
+func TestOpenAIGatewayServiceRecordUsage_SameGroupPricingGroupKeepsTextPricing(t *testing.T) {
+	groupID := int64(1431)
+	rateRepo := &openAIUserGroupRateByGroupRepoStub{rates: map[int64]float64{groupID: 0.30}}
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	svc := newOpenAIRecordUsageServiceForTest(
+		usageRepo,
+		&openAIRecordUsageUserRepoStub{},
+		&openAIRecordUsageSubRepoStub{},
+		rateRepo,
+	)
+	group := &Group{ID: groupID, Platform: PlatformOpenAI, RateMultiplier: 0.20}
+	usage := OpenAIUsage{InputTokens: 1200, OutputTokens: 300}
+
+	err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{
+			RequestID: "resp_text_same_pricing_group",
+			Model:     "gpt-5.1",
+			Usage:     usage,
+			Duration:  time.Second,
+		},
+		APIKey:       &APIKey{ID: 101431, GroupID: i64p(groupID), Group: group},
+		User:         &User{ID: 201431},
+		Account:      &Account{ID: 301431, Platform: PlatformOpenAI},
+		PricingGroup: group,
+	})
+
+	require.NoError(t, err)
+	expected := expectedOpenAICost(t, svc, "gpt-5.1", usage, 0.30)
+	require.NotNil(t, usageRepo.lastLog)
+	require.InDelta(t, expected.TotalCost, usageRepo.lastLog.TotalCost, 1e-12)
+	require.InDelta(t, expected.ActualCost, usageRepo.lastLog.ActualCost, 1e-12)
+	require.InDelta(t, 0.30, usageRepo.lastLog.RateMultiplier, 1e-12)
+	require.Equal(t, i64p(groupID), usageRepo.lastLog.GroupID)
+	require.Equal(t, []int64{groupID}, rateRepo.calls, "same-group PricingGroup must keep the legacy text path")
+}
+
+func TestOpenAIGatewayServiceRecordUsage_RoutedImageUsesTargetChannelAndAccountStats(t *testing.T) {
+	sourceGroupID := int64(144)
+	targetGroupID := int64(145)
+	model := "gpt-image-2"
+	sourceImagePrice := 0.91
+	sourceChannelPrice := 0.70
+	targetChannelPrice := 0.03
+	sourceStatsPrice := 0.81
+	targetStatsPrice := 0.07
+
+	cache := newEmptyChannelCache()
+	cache.pricingByGroupModel[channelModelKey{groupID: sourceGroupID, platform: PlatformOpenAI, model: model}] = &ChannelModelPricing{
+		BillingMode:     BillingModeImage,
+		PerRequestPrice: &sourceChannelPrice,
+	}
+	cache.pricingByGroupModel[channelModelKey{groupID: targetGroupID, platform: PlatformOpenAI, model: model}] = &ChannelModelPricing{
+		BillingMode:     BillingModeImage,
+		PerRequestPrice: &targetChannelPrice,
+	}
+	cache.channelByGroupID[sourceGroupID] = &Channel{
+		ID:     sourceGroupID,
+		Status: StatusActive,
+		AccountStatsPricingRules: []AccountStatsPricingRule{{
+			GroupIDs: []int64{sourceGroupID},
+			Pricing: []ChannelModelPricing{{
+				Platform:        PlatformOpenAI,
+				Models:          []string{model},
+				BillingMode:     BillingModeImage,
+				PerRequestPrice: &sourceStatsPrice,
+			}},
+		}},
+	}
+	cache.channelByGroupID[targetGroupID] = &Channel{
+		ID:     targetGroupID,
+		Status: StatusActive,
+		AccountStatsPricingRules: []AccountStatsPricingRule{{
+			GroupIDs: []int64{targetGroupID},
+			Pricing: []ChannelModelPricing{{
+				Platform:        PlatformOpenAI,
+				Models:          []string{model},
+				BillingMode:     BillingModeImage,
+				PerRequestPrice: &targetStatsPrice,
+			}},
+		}},
+	}
+	cache.groupPlatform[sourceGroupID] = PlatformOpenAI
+	cache.groupPlatform[targetGroupID] = PlatformOpenAI
+	cache.loadedAt = time.Now()
+	channelService := &ChannelService{}
+	channelService.cache.Store(cache)
+
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	svc := newOpenAIRecordUsageServiceForTest(usageRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil)
+	svc.channelService = channelService
+	svc.resolver = NewModelPricingResolver(channelService, svc.billingService)
+
+	err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{
+			RequestID:     "resp_routed_image_target_channel",
+			Model:         model,
+			UpstreamModel: model,
+			ImageCount:    2,
+			ImageSize:     ImageBillingSize1K,
+			Duration:      time.Second,
+		},
+		APIKey: &APIKey{
+			ID:      10144,
+			GroupID: i64p(sourceGroupID),
+			Group: &Group{
+				ID:             sourceGroupID,
+				Platform:       PlatformOpenAI,
+				RateMultiplier: 1,
+				ImagePrice1K:   &sourceImagePrice,
+			},
+		},
+		User:    &User{ID: 20144},
+		Account: &Account{ID: 30144, Platform: PlatformOpenAI},
+		PricingGroup: &Group{
+			ID:             targetGroupID,
+			Platform:       PlatformOpenAI,
+			RateMultiplier: 1,
+		},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, usageRepo.lastLog)
+	require.InDelta(t, 0.06, usageRepo.lastLog.TotalCost, 1e-12, "target channel image price must win")
+	require.InDelta(t, 0.06, usageRepo.lastLog.ActualCost, 1e-12)
+	require.Equal(t, i64p(sourceGroupID), usageRepo.lastLog.GroupID)
+	require.NotNil(t, usageRepo.lastLog.AccountStatsCost)
+	require.InDelta(t, 0.14, *usageRepo.lastLog.AccountStatsCost, 1e-12, "account statistics must use the actual target pool's channel")
+}
+
+func TestOpenAIGatewayServiceRecordUsage_RoutedImageTokenChannelUsesTargetGroup(t *testing.T) {
+	sourceGroupID := int64(146)
+	targetGroupID := int64(147)
+	model := "gpt-image-token-priced"
+	sourceImagePrice := 7.0
+	sourceInputPrice := 1e-3
+	sourceOutputPrice := 2e-3
+	sourceImageOutputPrice := 3e-3
+	targetInputPrice := 1e-6
+	targetOutputPrice := 2e-6
+	targetImageOutputPrice := 4e-6
+
+	cache := newEmptyChannelCache()
+	cache.pricingByGroupModel[channelModelKey{groupID: sourceGroupID, platform: PlatformOpenAI, model: model}] = &ChannelModelPricing{
+		BillingMode:      BillingModeToken,
+		InputPrice:       &sourceInputPrice,
+		OutputPrice:      &sourceOutputPrice,
+		ImageOutputPrice: &sourceImageOutputPrice,
+	}
+	cache.pricingByGroupModel[channelModelKey{groupID: targetGroupID, platform: PlatformOpenAI, model: model}] = &ChannelModelPricing{
+		BillingMode:      BillingModeToken,
+		InputPrice:       &targetInputPrice,
+		OutputPrice:      &targetOutputPrice,
+		ImageOutputPrice: &targetImageOutputPrice,
+	}
+	cache.channelByGroupID[sourceGroupID] = &Channel{ID: sourceGroupID, Status: StatusActive}
+	cache.channelByGroupID[targetGroupID] = &Channel{ID: targetGroupID, Status: StatusActive}
+	cache.groupPlatform[sourceGroupID] = PlatformOpenAI
+	cache.groupPlatform[targetGroupID] = PlatformOpenAI
+	cache.loadedAt = time.Now()
+	channelService := &ChannelService{}
+	channelService.cache.Store(cache)
+
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	svc := newOpenAIRecordUsageServiceForTest(usageRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil)
+	svc.resolver = NewModelPricingResolver(channelService, svc.billingService)
+
+	err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{
+			RequestID: "resp_routed_image_target_token_channel",
+			Model:     model,
+			Usage: OpenAIUsage{
+				InputTokens:       100,
+				OutputTokens:      50,
+				ImageOutputTokens: 20,
+			},
+			ImageCount: 1,
+			ImageSize:  ImageBillingSize1K,
+			Duration:   time.Second,
+		},
+		APIKey: &APIKey{
+			ID:      10146,
+			GroupID: i64p(sourceGroupID),
+			Group: &Group{
+				ID:             sourceGroupID,
+				Platform:       PlatformOpenAI,
+				RateMultiplier: 0.25,
+				ImagePrice1K:   &sourceImagePrice,
+			},
+		},
+		User:    &User{ID: 20146},
+		Account: &Account{ID: 30146, Platform: PlatformOpenAI},
+		PricingGroup: &Group{
+			ID:             targetGroupID,
+			Platform:       PlatformOpenAI,
+			RateMultiplier: 0.50,
+		},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, usageRepo.lastLog)
+	// Raw target cost: 100*1e-6 + 30*2e-6 + 20*4e-6 = 0.00024.
+	require.InDelta(t, 0.00024, usageRepo.lastLog.TotalCost, 1e-12)
+	require.InDelta(t, 0.00012, usageRepo.lastLog.ActualCost, 1e-12)
+	require.InDelta(t, 0.50, usageRepo.lastLog.RateMultiplier, 1e-12)
+	require.NotNil(t, usageRepo.lastLog.BillingMode)
+	require.Equal(t, string(BillingModeToken), *usageRepo.lastLog.BillingMode)
+	require.Equal(t, i64p(sourceGroupID), usageRepo.lastLog.GroupID)
 }
 
 func TestGrokVideoBillingUsesSeparateVideoRateMultiplier(t *testing.T) {

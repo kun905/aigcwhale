@@ -272,6 +272,9 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	body = updatedBody
 
 	apiKey := getAPIKeyFromContext(c)
+	// 图片权限跟随显式配置的图片目标分组；其它请求级计费/配额归属仍由
+	// 认证 API Key 的源分组决定。
+	permissionGroup := OpenAIImageGenerationGroupForRequest(ctx, apiKeyGroup(apiKey))
 	// 同一 attempt 的最终 model/body 只判定一次，权限检查与后续图片状态设置共用该结果。
 	imageIntent := resolveOpenAIPassthroughImageIntent(
 		c,
@@ -282,7 +285,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		attemptImageIntentInvalidated,
 		IsImageGenerationIntent,
 	)
-	if imageIntent && !GroupAllowsImageGeneration(apiKeyGroup(apiKey)) {
+	if imageIntent && !GroupAllowsImageGeneration(permissionGroup) {
 		MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalFeatureGate)
 		c.JSON(http.StatusForbidden, gin.H{
 			"error": gin.H{

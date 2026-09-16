@@ -106,6 +106,24 @@ func classifyNoAccountError(
 	displayModel string,
 	platform string,
 ) noAccountErrorClassification {
+	var groupID *int64
+	if apiKey != nil {
+		groupID = apiKey.GroupID
+	}
+	return classifyNoAccountErrorForGroup(ctx, diag, groupID, routingModel, displayModel, platform)
+}
+
+// classifyNoAccountErrorForGroup runs the availability diagnosis against the
+// account pool that selection actually used. Most requests use the API key's
+// source group, while routed image requests pass their target group explicitly.
+func classifyNoAccountErrorForGroup(
+	ctx context.Context,
+	diag service.ModelAvailabilityDiagnoser,
+	groupID *int64,
+	routingModel string,
+	displayModel string,
+	platform string,
+) noAccountErrorClassification {
 	fallback := noAccountErrorClassification{
 		Status:  http.StatusServiceUnavailable,
 		ErrType: "api_error",
@@ -117,11 +135,11 @@ func classifyNoAccountError(
 	if displayModel == "" {
 		displayModel = routingModel
 	}
-	if diag == nil || apiKey == nil || apiKey.GroupID == nil || routingModel == "" {
+	if diag == nil || groupID == nil || routingModel == "" {
 		return fallback
 	}
 
-	result := diag.DiagnoseModelAvailabilityForPlatform(ctx, apiKey.GroupID, routingModel, platform)
+	result := diag.DiagnoseModelAvailabilityForPlatform(ctx, groupID, routingModel, platform)
 	if result.HasAccountsInPool && !result.HasModelSupport {
 		return noAccountErrorClassification{
 			Status:        http.StatusNotFound,
@@ -144,11 +162,26 @@ func classifyNoAccountErrorFromGin(
 	displayModel string,
 	platform string,
 ) noAccountErrorClassification {
+	var groupID *int64
+	if apiKey != nil {
+		groupID = apiKey.GroupID
+	}
+	return classifyNoAccountErrorForGroupFromGin(c, diag, groupID, routingModel, displayModel, platform)
+}
+
+func classifyNoAccountErrorForGroupFromGin(
+	c *gin.Context,
+	diag service.ModelAvailabilityDiagnoser,
+	groupID *int64,
+	routingModel string,
+	displayModel string,
+	platform string,
+) noAccountErrorClassification {
 	ctx := context.Background()
 	if c != nil && c.Request != nil {
 		ctx = c.Request.Context()
 	}
-	classification := classifyNoAccountError(ctx, diag, apiKey, routingModel, displayModel, platform)
+	classification := classifyNoAccountErrorForGroup(ctx, diag, groupID, routingModel, displayModel, platform)
 	if classification.ModelNotFound {
 		service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalModelConfiguration)
 	}

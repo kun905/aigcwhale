@@ -320,6 +320,24 @@ func TestAPIKeyService_SnapshotRoundTrip_PreservesReasoningEffortPolicy(t *testi
 	require.Equal(t, apiKey.Group.ReasoningEffortMappings, roundTrip.Group.ReasoningEffortMappings)
 }
 
+func TestAPIKeyService_SnapshotRoundTrip_PreservesImageGenerationGroupID(t *testing.T) {
+	svc := NewAPIKeyService(nil, nil, nil, nil, nil, nil, &config.Config{})
+	groupID := int64(9)
+	targetID := int64(42)
+	apiKey := &APIKey{
+		ID: 1, UserID: 2, GroupID: &groupID, Key: "k-image-route", Status: StatusActive,
+		User:  &User{ID: 2, Status: StatusActive, Role: RoleUser, Balance: 10, Concurrency: 1},
+		Group: &Group{ID: groupID, Name: "openai", Platform: PlatformOpenAI, Status: StatusActive, Hydrated: true, ImageGenerationGroupID: &targetID},
+	}
+	snapshot := svc.snapshotFromAPIKey(context.Background(), apiKey)
+	require.Equal(t, apiKeyAuthSnapshotVersion, snapshot.Version)
+	require.NotNil(t, snapshot.Group)
+	require.Equal(t, &targetID, snapshot.Group.ImageGenerationGroupID)
+	roundTrip := svc.snapshotToAPIKey(apiKey.Key, snapshot)
+	require.NotNil(t, roundTrip.Group)
+	require.Equal(t, &targetID, roundTrip.Group.ImageGenerationGroupID)
+}
+
 func TestAPIKeyService_GetByKey_IgnoresLegacyAuthCacheSnapshotWithoutMessagesDispatchConfig(t *testing.T) {
 	cache := &authCacheStub{}
 	var repoCalls int32

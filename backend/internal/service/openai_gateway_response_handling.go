@@ -1452,6 +1452,61 @@ func (s *OpenAIGatewayService) BindOpenAIHTTPResponseOwner(
 	)
 }
 
+// OpenAIHTTPContinuationCrossesRoutingGroup reports whether responseID has no
+// account binding in the group selected for the current request but does have
+// one in the alternate text/image pool. In that case forwarding the unchanged
+// previous_response_id through a newly selected account would lose upstream
+// response state, so the handler must require a fresh response instead.
+//
+// A binding in the expected group always wins. Missing bindings in both groups
+// preserve the historical scheduler path for old or externally-created IDs.
+func (s *OpenAIGatewayService) OpenAIHTTPContinuationCrossesRoutingGroup(
+	ctx context.Context,
+	responseID string,
+	expectedGroupID, alternateGroupID int64,
+) (bool, error) {
+	expectedBound, alternateBound, err := s.OpenAIContinuationRoutingGroupBindings(
+		ctx, responseID, expectedGroupID, alternateGroupID,
+	)
+	return !expectedBound && alternateBound, err
+}
+
+// OpenAIContinuationRoutingGroupBindings reports where responseID is bound
+// across the two account pools available to a text/image routed API key.
+// The expected binding is resolved first and wins without consulting the
+// alternate pool. Callers can therefore distinguish a safe same-pool
+// continuation from a legacy ID that is unknown in both pools.
+func (s *OpenAIGatewayService) OpenAIContinuationRoutingGroupBindings(
+	ctx context.Context,
+	responseID string,
+	expectedGroupID, alternateGroupID int64,
+) (expectedBound, alternateBound bool, err error) {
+	responseID = strings.TrimSpace(responseID)
+	if s == nil || responseID == "" || expectedGroupID <= 0 || alternateGroupID <= 0 || expectedGroupID == alternateGroupID {
+		return false, false, nil
+	}
+	store := s.getOpenAIWSStateStore()
+	if store == nil {
+		return false, false, nil
+	}
+	lookupResponseAccount := store.GetResponseAccount
+	if strictStore, ok := store.(openAIWSResponseAccountStrictReader); ok {
+		lookupResponseAccount = strictStore.GetResponseAccountStrict
+	}
+	expectedAccountID, err := lookupResponseAccount(ctx, expectedGroupID, responseID)
+	if err != nil {
+		return false, false, err
+	}
+	if expectedAccountID > 0 {
+		return true, false, nil
+	}
+	alternateAccountID, err := lookupResponseAccount(ctx, alternateGroupID, responseID)
+	if err != nil {
+		return false, false, err
+	}
+	return false, alternateAccountID > 0, nil
+}
+
 func (s *OpenAIGatewayService) bindHTTPResponseAccount(ctx context.Context, c *gin.Context, account *Account, responseID string) {
 	if s == nil || account == nil || account.ID <= 0 {
 		return
@@ -1464,15 +1519,16 @@ func (s *OpenAIGatewayService) bindHTTPResponseAccount(ctx context.Context, c *g
 	if store == nil {
 		return
 	}
-	groupID := getOpenAIGroupIDFromContext(c)
+	routingGroupID := getOpenAIGroupIDFromContext(c)
 	ttl := s.openAIWSResponseStickyTTL()
-	logOpenAIWSBindResponseAccountWarn(groupID, account.ID, responseID, store.BindResponseAccount(ctx, groupID, responseID, account.ID, ttl))
+	logOpenAIWSBindResponseAccountWarn(routingGroupID, account.ID, responseID, store.BindResponseAccount(ctx, routingGroupID, responseID, account.ID, ttl))
 	if rawOwner, ok := c.Get(openAIHTTPResponseOwnerContextKey); ok {
 		if owner, ok := rawOwner.(openAIHTTPResponseOwner); ok && owner.userID > 0 && owner.apiKeyID > 0 {
-			if err := s.BindOpenAIHTTPResponseOwner(ctx, groupID, responseID, owner.userID, owner.apiKeyID); err != nil {
+			ownerGroupID := getOpenAIAuthenticatedGroupIDFromContext(c)
+			if err := s.BindOpenAIHTTPResponseOwner(ctx, ownerGroupID, responseID, owner.userID, owner.apiKeyID); err != nil {
 				logger.L().Warn(
 					"openai.http_bind_response_owner_failed",
-					zap.Int64("group_id", groupID),
+					zap.Int64("group_id", ownerGroupID),
 					zap.Int64("account_id", account.ID),
 					zap.Int64("user_id", owner.userID),
 					zap.Int64("api_key_id", owner.apiKeyID),

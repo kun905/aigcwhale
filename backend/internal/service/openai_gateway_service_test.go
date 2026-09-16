@@ -589,6 +589,112 @@ func TestOpenAIGatewayService_BindHTTPResponseAccount(t *testing.T) {
 	require.False(t, owned)
 }
 
+func TestOpenAIGatewayService_BindHTTPResponseAccountUsesRoutedImageGroup(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	sourceGroupID := int64(4201)
+	targetGroupID := int64(4202)
+	c.Set("api_key", &APIKey{ID: 501, GroupID: &sourceGroupID})
+	target := &Group{
+		ID:       targetGroupID,
+		Platform: PlatformOpenAI,
+		Status:   StatusActive,
+		Hydrated: true,
+	}
+	c.Request = c.Request.WithContext(WithOpenAIImageGenerationGroup(c.Request.Context(), target))
+	SetOpenAIHTTPResponseOwner(c, 601, 501)
+
+	svc := &OpenAIGatewayService{}
+	account := &Account{ID: 37001, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	svc.bindHTTPResponseAccount(context.Background(), c, account, "resp_image_routed")
+
+	got, err := svc.getOpenAIWSStateStore().GetResponseAccount(context.Background(), targetGroupID, "resp_image_routed")
+	require.NoError(t, err)
+	require.Equal(t, account.ID, got)
+
+	sourceGot, err := svc.getOpenAIWSStateStore().GetResponseAccount(context.Background(), sourceGroupID, "resp_image_routed")
+	require.NoError(t, err)
+	require.Zero(t, sourceGot)
+
+	owned, err := svc.ValidateOpenAIHTTPResponseOwner(context.Background(), sourceGroupID, "resp_image_routed", 601, 501)
+	require.NoError(t, err)
+	require.True(t, owned)
+
+	owned, err = svc.ValidateOpenAIHTTPResponseOwner(context.Background(), targetGroupID, "resp_image_routed", 601, 501)
+	require.NoError(t, err)
+	require.False(t, owned, "downstream ownership remains keyed to the authenticated source group")
+}
+
+func TestOpenAIGatewayService_HTTPContinuationCrossesRoutingGroup(t *testing.T) {
+	ctx := context.Background()
+	svc := &OpenAIGatewayService{}
+	store := svc.getOpenAIWSStateStore()
+	sourceGroupID := int64(4201)
+	targetGroupID := int64(4202)
+
+	require.NoError(t, store.BindResponseAccount(ctx, targetGroupID, "resp_image_only", 37001, time.Minute))
+	expectedBound, alternateBound, err := svc.OpenAIContinuationRoutingGroupBindings(ctx, "resp_image_only", sourceGroupID, targetGroupID)
+	require.NoError(t, err)
+	require.False(t, expectedBound)
+	require.True(t, alternateBound)
+
+	crosses, err := svc.OpenAIHTTPContinuationCrossesRoutingGroup(ctx, "resp_image_only", sourceGroupID, targetGroupID)
+	require.NoError(t, err)
+	require.True(t, crosses)
+
+	expectedBound, alternateBound, err = svc.OpenAIContinuationRoutingGroupBindings(ctx, "resp_image_only", targetGroupID, sourceGroupID)
+	require.NoError(t, err)
+	require.True(t, expectedBound)
+	require.False(t, alternateBound, "the expected binding wins without consulting the alternate pool")
+
+	crosses, err = svc.OpenAIHTTPContinuationCrossesRoutingGroup(ctx, "resp_image_only", targetGroupID, sourceGroupID)
+	require.NoError(t, err)
+	require.False(t, crosses, "the current routed group already owns the response binding")
+
+	require.NoError(t, store.BindResponseAccount(ctx, sourceGroupID, "resp_both", 37002, time.Minute))
+	require.NoError(t, store.BindResponseAccount(ctx, targetGroupID, "resp_both", 37003, time.Minute))
+	crosses, err = svc.OpenAIHTTPContinuationCrossesRoutingGroup(ctx, "resp_both", sourceGroupID, targetGroupID)
+	require.NoError(t, err)
+	require.False(t, crosses, "an expected-group binding takes precedence")
+
+	crosses, err = svc.OpenAIHTTPContinuationCrossesRoutingGroup(ctx, "resp_unknown", sourceGroupID, targetGroupID)
+	require.NoError(t, err)
+	require.False(t, crosses, "missing legacy bindings preserve the historical path")
+
+	expectedBound, alternateBound, err = svc.OpenAIContinuationRoutingGroupBindings(ctx, "resp_unknown", sourceGroupID, targetGroupID)
+	require.NoError(t, err)
+	require.False(t, expectedBound)
+	require.False(t, alternateBound)
+}
+
+func TestOpenAIGatewayService_ContinuationRoutingGroupBindingsPropagatesCacheFailure(t *testing.T) {
+	ctx := context.Background()
+	lookupErr := errors.New("routing cache unavailable")
+	svc := &OpenAIGatewayService{cache: &stubGatewayCache{getErr: lookupErr}}
+
+	expectedBound, alternateBound, err := svc.OpenAIContinuationRoutingGroupBindings(
+		ctx,
+		"resp_cache_failure",
+		4207,
+		4208,
+	)
+	require.ErrorIs(t, err, lookupErr)
+	require.False(t, expectedBound)
+	require.False(t, alternateBound)
+
+	missSvc := &OpenAIGatewayService{cache: &stubGatewayCache{getErr: ErrStickySessionNotFound}}
+	expectedBound, alternateBound, err = missSvc.OpenAIContinuationRoutingGroupBindings(
+		ctx,
+		"resp_cache_miss",
+		4207,
+		4208,
+	)
+	require.NoError(t, err)
+	require.False(t, expectedBound)
+	require.False(t, alternateBound)
+}
+
 func TestOpenAIGatewayService_GenerateExplicitSessionHash_SkipsContentFallback(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	svc := &OpenAIGatewayService{}
@@ -708,13 +814,17 @@ func (c stubConcurrencyCache) GetAccountWaitingCount(ctx context.Context, accoun
 type stubGatewayCache struct {
 	sessionBindings map[string]int64
 	deletedSessions map[string]int
+	getErr          error
 }
 
 func (c *stubGatewayCache) GetSessionAccountID(ctx context.Context, groupID int64, sessionHash string) (int64, error) {
+	if c.getErr != nil {
+		return 0, c.getErr
+	}
 	if id, ok := c.sessionBindings[sessionHash]; ok {
 		return id, nil
 	}
-	return 0, errors.New("not found")
+	return 0, ErrStickySessionNotFound
 }
 
 func (c *stubGatewayCache) SetSessionAccountID(ctx context.Context, groupID int64, sessionHash string, accountID int64, ttl time.Duration) error {

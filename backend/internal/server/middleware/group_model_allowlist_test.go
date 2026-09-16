@@ -39,7 +39,10 @@ func newGroupModelAllowlistTestRouter(apiKey *service.APIKey, pathPrefix string)
 	register(http.MethodGet, pathPrefix+"/models/:model")
 	register(http.MethodPost, pathPrefix+"/models/*modelAction")
 	register(http.MethodGet, pathPrefix+"/realtime")
+	register(http.MethodPost, pathPrefix+"/images/generations")
 	register(http.MethodPost, pathPrefix+"/images/edits")
+	register(http.MethodPost, pathPrefix+"/images/generations/async")
+	register(http.MethodPost, pathPrefix+"/images/edits/async")
 	register(http.MethodPost, pathPrefix+"/live")
 	return router, &calls
 }
@@ -50,6 +53,19 @@ func allowlistAPIKey(enabled bool, models ...string) *service.APIKey {
 			Platform: service.PlatformAnthropic,
 			ModelAllowlist: service.GroupModelAllowlist{
 				Enabled: enabled,
+				Models:  models,
+			},
+		},
+	}
+}
+
+func allowlistOpenAIAPIKeyWithImageTarget(targetID int64, models ...string) *service.APIKey {
+	return &service.APIKey{
+		Group: &service.Group{
+			Platform:               service.PlatformOpenAI,
+			ImageGenerationGroupID: &targetID,
+			ModelAllowlist: service.GroupModelAllowlist{
+				Enabled: true,
 				Models:  models,
 			},
 		},
@@ -281,6 +297,165 @@ func TestGroupModelAllowlistMultipartDenied(t *testing.T) {
 	router.ServeHTTP(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestGroupModelAllowlistDefersConfiguredImageGenerationTarget(t *testing.T) {
+	router, calls := newGroupModelAllowlistTestRouter(
+		allowlistOpenAIAPIKeyWithImageTarget(42, "gpt-5.*"),
+		"/v1",
+	)
+
+	w := doJSON(t, router, http.MethodPost, "/v1/images/generations", `{"model":"gpt-image-1","prompt":"cat"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("configured image route should defer source allowlist, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("expected image handler to run once, got %v", *calls)
+	}
+}
+
+func TestGroupModelAllowlistDefersConfiguredImageEditMultipart(t *testing.T) {
+	router, calls := newGroupModelAllowlistTestRouter(
+		allowlistOpenAIAPIKeyWithImageTarget(42, "gpt-5.*"),
+		"/v1",
+	)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	_ = writer.WriteField("model", "gpt-image-1")
+	_ = writer.WriteField("prompt", "cat")
+	_ = writer.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/edits", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("configured image route should defer multipart source allowlist, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("expected image handler to run once, got %v", *calls)
+	}
+}
+
+func TestGroupModelAllowlistDefersConfiguredAsyncImageRoutes(t *testing.T) {
+	for _, prefix := range []string{"", "/v1"} {
+		prefix := prefix
+		t.Run("prefix="+prefix, func(t *testing.T) {
+			router, calls := newGroupModelAllowlistTestRouter(
+				allowlistOpenAIAPIKeyWithImageTarget(42, "gpt-5.*"),
+				prefix,
+			)
+			for _, suffix := range []string{"/images/generations/async", "/images/edits/async"} {
+				w := doJSON(t, router, http.MethodPost, prefix+suffix, `{"model":"gpt-image-1","prompt":"cat"}`)
+				if w.Code != http.StatusOK {
+					t.Fatalf("%s should defer source allowlist, got %d: %s", prefix+suffix, w.Code, w.Body.String())
+				}
+			}
+			if len(*calls) != 2 {
+				t.Fatalf("expected both async handlers to run, got %v", *calls)
+			}
+		})
+	}
+}
+
+func TestGroupModelAllowlistDoesNotDeferWithoutValidOpenAITarget(t *testing.T) {
+	zero := int64(0)
+	positive := int64(42)
+	cases := []struct {
+		name   string
+		apiKey *service.APIKey
+	}{
+		{
+			name: "no target",
+			apiKey: &service.APIKey{Group: &service.Group{
+				Platform:       service.PlatformOpenAI,
+				ModelAllowlist: service.GroupModelAllowlist{Enabled: true, Models: []string{"gpt-5.*"}},
+			}},
+		},
+		{
+			name: "zero target",
+			apiKey: &service.APIKey{Group: &service.Group{
+				Platform: service.PlatformOpenAI, ImageGenerationGroupID: &zero,
+				ModelAllowlist: service.GroupModelAllowlist{Enabled: true, Models: []string{"gpt-5.*"}},
+			}},
+		},
+		{
+			name: "non openai source",
+			apiKey: &service.APIKey{Group: &service.Group{
+				Platform: service.PlatformAnthropic, ImageGenerationGroupID: &positive,
+				ModelAllowlist: service.GroupModelAllowlist{Enabled: true, Models: []string{"gpt-5.*"}},
+			}},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			router, calls := newGroupModelAllowlistTestRouter(tc.apiKey, "/v1")
+			w := doJSON(t, router, http.MethodPost, "/v1/images/generations", `{"model":"gpt-image-1"}`)
+			if w.Code != http.StatusNotFound {
+				t.Fatalf("invalid image target must keep source allowlist, got %d: %s", w.Code, w.Body.String())
+			}
+			if len(*calls) != 0 {
+				t.Fatalf("expected handler not to run, got %v", *calls)
+			}
+		})
+	}
+}
+
+func TestGroupModelAllowlistConfiguredImageTargetDoesNotRelaxResponses(t *testing.T) {
+	router, calls := newGroupModelAllowlistTestRouter(
+		allowlistOpenAIAPIKeyWithImageTarget(42, "gpt-5.*"),
+		"/v1",
+	)
+
+	w := doJSON(t, router, http.MethodPost, "/v1/responses", `{"model":"gpt-image-1","input":"draw a cat"}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("Responses must still use source allowlist, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("expected handler not to run, got %v", *calls)
+	}
+}
+
+func TestShouldDeferImageGenerationGroupAllowlistMatchesOnlyImageCreationPosts(t *testing.T) {
+	apiKey := allowlistOpenAIAPIKeyWithImageTarget(42, "gpt-5.*")
+	allowed := []string{
+		"/v1/images/generations",
+		"/v1/images/edits",
+		"/v1/images/generations/async",
+		"/v1/images/edits/async",
+		"/images/generations",
+		"/images/edits",
+		"/images/generations/async",
+		"/images/edits/async",
+	}
+	for _, path := range allowed {
+		t.Run(path, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, path, nil)
+			if !shouldDeferImageGenerationGroupAllowlist(c, apiKey) {
+				t.Fatalf("expected %s to defer the source allowlist", path)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/v1/images/generations"},
+		{http.MethodPost, "/v1/images/batches"},
+		{http.MethodPost, "/v1/images/tasks/task-1"},
+		{http.MethodPost, "/v1/responses"},
+	} {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(tc.method, tc.path, nil)
+		if shouldDeferImageGenerationGroupAllowlist(c, apiKey) {
+			t.Fatalf("must not defer %s %s", tc.method, tc.path)
+		}
 	}
 }
 

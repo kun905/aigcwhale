@@ -22149,6 +22149,8 @@ type GroupMutation struct {
 	addfallback_group_id                    *int64
 	fallback_group_id_on_invalid_request    *int64
 	addfallback_group_id_on_invalid_request *int64
+	image_generation_group_id               *int64
+	addimage_generation_group_id            *int64
 	model_routing                           *map[string][]int64
 	model_routing_enabled                   *bool
 	mcp_xml_inject                          *bool
@@ -24648,6 +24650,76 @@ func (m *GroupMutation) ResetFallbackGroupIDOnInvalidRequest() {
 	delete(m.clearedFields, group.FieldFallbackGroupIDOnInvalidRequest)
 }
 
+// SetImageGenerationGroupID sets the "image_generation_group_id" field.
+func (m *GroupMutation) SetImageGenerationGroupID(i int64) {
+	m.image_generation_group_id = &i
+	m.addimage_generation_group_id = nil
+}
+
+// ImageGenerationGroupID returns the value of the "image_generation_group_id" field in the mutation.
+func (m *GroupMutation) ImageGenerationGroupID() (r int64, exists bool) {
+	v := m.image_generation_group_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldImageGenerationGroupID returns the old "image_generation_group_id" field's value of the Group entity.
+// If the Group object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GroupMutation) OldImageGenerationGroupID(ctx context.Context) (v *int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldImageGenerationGroupID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldImageGenerationGroupID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldImageGenerationGroupID: %w", err)
+	}
+	return oldValue.ImageGenerationGroupID, nil
+}
+
+// AddImageGenerationGroupID adds i to the "image_generation_group_id" field.
+func (m *GroupMutation) AddImageGenerationGroupID(i int64) {
+	if m.addimage_generation_group_id != nil {
+		*m.addimage_generation_group_id += i
+	} else {
+		m.addimage_generation_group_id = &i
+	}
+}
+
+// AddedImageGenerationGroupID returns the value that was added to the "image_generation_group_id" field in this mutation.
+func (m *GroupMutation) AddedImageGenerationGroupID() (r int64, exists bool) {
+	v := m.addimage_generation_group_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearImageGenerationGroupID clears the value of the "image_generation_group_id" field.
+func (m *GroupMutation) ClearImageGenerationGroupID() {
+	m.image_generation_group_id = nil
+	m.addimage_generation_group_id = nil
+	m.clearedFields[group.FieldImageGenerationGroupID] = struct{}{}
+}
+
+// ImageGenerationGroupIDCleared returns if the "image_generation_group_id" field was cleared in this mutation.
+func (m *GroupMutation) ImageGenerationGroupIDCleared() bool {
+	_, ok := m.clearedFields[group.FieldImageGenerationGroupID]
+	return ok
+}
+
+// ResetImageGenerationGroupID resets all changes to the "image_generation_group_id" field.
+func (m *GroupMutation) ResetImageGenerationGroupID() {
+	m.image_generation_group_id = nil
+	m.addimage_generation_group_id = nil
+	delete(m.clearedFields, group.FieldImageGenerationGroupID)
+}
+
 // SetModelRouting sets the "model_routing" field.
 func (m *GroupMutation) SetModelRouting(value map[string][]int64) {
 	m.model_routing = &value
@@ -25921,7 +25993,7 @@ func (m *GroupMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *GroupMutation) Fields() []string {
-	fields := make([]string, 0, 66)
+	fields := make([]string, 0, 67)
 	if m.created_at != nil {
 		fields = append(fields, group.FieldCreatedAt)
 	}
@@ -26053,6 +26125,9 @@ func (m *GroupMutation) Fields() []string {
 	}
 	if m.fallback_group_id_on_invalid_request != nil {
 		fields = append(fields, group.FieldFallbackGroupIDOnInvalidRequest)
+	}
+	if m.image_generation_group_id != nil {
+		fields = append(fields, group.FieldImageGenerationGroupID)
 	}
 	if m.model_routing != nil {
 		fields = append(fields, group.FieldModelRouting)
@@ -26216,6 +26291,8 @@ func (m *GroupMutation) Field(name string) (ent.Value, bool) {
 		return m.FallbackGroupID()
 	case group.FieldFallbackGroupIDOnInvalidRequest:
 		return m.FallbackGroupIDOnInvalidRequest()
+	case group.FieldImageGenerationGroupID:
+		return m.ImageGenerationGroupID()
 	case group.FieldModelRouting:
 		return m.ModelRouting()
 	case group.FieldModelRoutingEnabled:
@@ -26357,6 +26434,8 @@ func (m *GroupMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldFallbackGroupID(ctx)
 	case group.FieldFallbackGroupIDOnInvalidRequest:
 		return m.OldFallbackGroupIDOnInvalidRequest(ctx)
+	case group.FieldImageGenerationGroupID:
+		return m.OldImageGenerationGroupID(ctx)
 	case group.FieldModelRouting:
 		return m.OldModelRouting(ctx)
 	case group.FieldModelRoutingEnabled:
@@ -26718,6 +26797,13 @@ func (m *GroupMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetFallbackGroupIDOnInvalidRequest(v)
 		return nil
+	case group.FieldImageGenerationGroupID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetImageGenerationGroupID(v)
+		return nil
 	case group.FieldModelRouting:
 		v, ok := value.(map[string][]int64)
 		if !ok {
@@ -26949,6 +27035,9 @@ func (m *GroupMutation) AddedFields() []string {
 	if m.addfallback_group_id_on_invalid_request != nil {
 		fields = append(fields, group.FieldFallbackGroupIDOnInvalidRequest)
 	}
+	if m.addimage_generation_group_id != nil {
+		fields = append(fields, group.FieldImageGenerationGroupID)
+	}
 	if m.addsort_order != nil {
 		fields = append(fields, group.FieldSortOrder)
 	}
@@ -27015,6 +27104,8 @@ func (m *GroupMutation) AddedField(name string) (ent.Value, bool) {
 		return m.AddedFallbackGroupID()
 	case group.FieldFallbackGroupIDOnInvalidRequest:
 		return m.AddedFallbackGroupIDOnInvalidRequest()
+	case group.FieldImageGenerationGroupID:
+		return m.AddedImageGenerationGroupID()
 	case group.FieldSortOrder:
 		return m.AddedSortOrder()
 	case group.FieldRpmLimit:
@@ -27193,6 +27284,13 @@ func (m *GroupMutation) AddField(name string, value ent.Value) error {
 		}
 		m.AddFallbackGroupIDOnInvalidRequest(v)
 		return nil
+	case group.FieldImageGenerationGroupID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddImageGenerationGroupID(v)
+		return nil
 	case group.FieldSortOrder:
 		v, ok := value.(int)
 		if !ok {
@@ -27292,6 +27390,9 @@ func (m *GroupMutation) ClearedFields() []string {
 	if m.FieldCleared(group.FieldFallbackGroupIDOnInvalidRequest) {
 		fields = append(fields, group.FieldFallbackGroupIDOnInvalidRequest)
 	}
+	if m.FieldCleared(group.FieldImageGenerationGroupID) {
+		fields = append(fields, group.FieldImageGenerationGroupID)
+	}
 	if m.FieldCleared(group.FieldModelRouting) {
 		fields = append(fields, group.FieldModelRouting)
 	}
@@ -27371,6 +27472,9 @@ func (m *GroupMutation) ClearField(name string) error {
 		return nil
 	case group.FieldFallbackGroupIDOnInvalidRequest:
 		m.ClearFallbackGroupIDOnInvalidRequest()
+		return nil
+	case group.FieldImageGenerationGroupID:
+		m.ClearImageGenerationGroupID()
 		return nil
 	case group.FieldModelRouting:
 		m.ClearModelRouting()
@@ -27514,6 +27618,9 @@ func (m *GroupMutation) ResetField(name string) error {
 		return nil
 	case group.FieldFallbackGroupIDOnInvalidRequest:
 		m.ResetFallbackGroupIDOnInvalidRequest()
+		return nil
+	case group.FieldImageGenerationGroupID:
+		m.ResetImageGenerationGroupID()
 		return nil
 	case group.FieldModelRouting:
 		m.ResetModelRouting()

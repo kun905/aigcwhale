@@ -595,6 +595,20 @@ func (s *OpenAIGatewayService) ResolveChannelMapping(ctx context.Context, groupI
 	return s.channelService.ResolveChannelMapping(ctx, groupID, model)
 }
 
+// ResolveGroupByID loads the lite group record used by request-level routing.
+// Keeping this lookup behind OpenAIGatewayService avoids widening the handler's
+// dependency graph while still making image-generation target validation use
+// the same repository that backs channel routing.
+func (s *OpenAIGatewayService) ResolveGroupByID(ctx context.Context, groupID int64) (*Group, error) {
+	if groupID <= 0 {
+		return nil, fmt.Errorf("group id must be positive")
+	}
+	if s == nil || s.channelService == nil || s.channelService.groupRepo == nil {
+		return nil, errors.New("group repository is unavailable")
+	}
+	return s.channelService.groupRepo.GetByIDLite(ctx, groupID)
+}
+
 // IsModelRestricted 检查模型是否被渠道限制（代理到 ChannelService）
 func (s *OpenAIGatewayService) IsModelRestricted(ctx context.Context, groupID int64, model string) bool {
 	if s.channelService == nil {
@@ -616,10 +630,15 @@ func (s *OpenAIGatewayService) isCodexImageGenerationBridgeEnabled(ctx context.C
 	if override := account.CodexImageGenerationBridgeOverride(); override != nil {
 		return *override
 	}
-	if s != nil && s.channelService != nil && apiKey != nil && apiKey.GroupID != nil {
-		ch, err := s.channelService.GetChannelForGroup(ctx, *apiKey.GroupID)
+	var sourceGroupID *int64
+	if apiKey != nil {
+		sourceGroupID = apiKey.GroupID
+	}
+	bridgeGroupID := OpenAIImageGenerationGroupIDForRequest(ctx, sourceGroupID)
+	if s != nil && s.channelService != nil && bridgeGroupID != nil && *bridgeGroupID > 0 {
+		ch, err := s.channelService.GetChannelForGroup(ctx, *bridgeGroupID)
 		if err != nil {
-			slog.Warn("failed to resolve codex image generation bridge channel override", "group_id", *apiKey.GroupID, "error", err)
+			slog.Warn("failed to resolve codex image generation bridge channel override", "group_id", *bridgeGroupID, "error", err)
 		} else if override := ch.CodexImageGenerationBridgeOverride(PlatformOpenAI); override != nil {
 			return *override
 		}

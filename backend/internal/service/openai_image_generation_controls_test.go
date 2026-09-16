@@ -55,6 +55,36 @@ func TestOpenAIGatewayServiceForward_RejectsDisabledImageGenerationIntents(t *te
 	}
 }
 
+func TestOpenAIGatewayServiceForward_RoutedImageTargetAllowsDisabledSourceGroup(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body: io.NopCloser(strings.NewReader(
+			`{"id":"resp_routed_image","model":"gpt-5.4","output":[{"id":"ig_routed","type":"image_generation_call","result":"final-image"}],"usage":{"input_tokens":1,"output_tokens":2}}`,
+		)),
+	}}
+	svc := newOpenAIImageGenerationControlTestService(upstream)
+	c, recorder := newOpenAIImageGenerationControlTestContext(false, "unit-test-agent/1.0")
+	target := newOpenAIImageGenerationRoutingTargetForTest(5252, true)
+	routedCtx := WithOpenAIImageGenerationGroup(context.Background(), target)
+	c.Request = c.Request.WithContext(routedCtx)
+
+	result, err := svc.Forward(
+		routedCtx,
+		c,
+		newOpenAIImageGenerationControlTestAccount(),
+		[]byte(`{"model":"gpt-5.4","input":"draw","tools":[{"type":"image_generation"}],"stream":false}`),
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.NotNil(t, upstream.lastReq, "routed image request must reach the target account")
+	require.Equal(t, 1, result.ImageCount)
+}
+
 func TestOpenAIGatewayServiceForward_DisabledGroupAllowsTextOnlyResponses(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -542,6 +572,29 @@ func TestOpenAIGatewayService_CodexImageGenerationBridgeOverridePrecedence(t *te
 	}
 }
 
+func TestOpenAIGatewayService_CodexImageGenerationBridgeUsesRoutedTargetChannel(t *testing.T) {
+	sourceGroupID := int64(4242)
+	targetGroupID := int64(5252)
+	svc := newOpenAIImageGenerationControlTestService(&httpUpstreamRecorder{})
+	svc.cfg.Gateway.CodexImageGenerationBridgeEnabled = false
+	svc.channelService = newOpenAIImageGenerationControlChannelService(targetGroupID, &Channel{
+		ID:     12,
+		Status: StatusActive,
+		FeaturesConfig: map[string]any{
+			featureKeyCodexImageGenerationBridge: map[string]any{PlatformOpenAI: true},
+		},
+	})
+	target := newOpenAIImageGenerationRoutingTargetForTest(targetGroupID, true)
+	routedCtx := WithOpenAIImageGenerationGroup(context.Background(), target)
+	apiKey := &APIKey{GroupID: &sourceGroupID}
+
+	require.True(t, svc.isCodexImageGenerationBridgeEnabled(
+		routedCtx,
+		&Account{Platform: PlatformOpenAI},
+		apiKey,
+	))
+}
+
 func TestOpenAIGatewayServiceHandleResponsesImageOutputs_NonStreaming(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -749,5 +802,18 @@ func newOpenAIImageGenerationControlTestAccount() *Account {
 		Credentials: map[string]any{
 			"api_key": "sk-test",
 		},
+	}
+}
+
+func newOpenAIImageGenerationRoutingTargetForTest(groupID int64, allowImages bool) *Group {
+	return &Group{
+		ID:                   groupID,
+		Name:                 "image-target",
+		Platform:             PlatformOpenAI,
+		Status:               StatusActive,
+		Hydrated:             true,
+		AllowImageGeneration: allowImages,
+		RateMultiplier:       1,
+		ImageRateMultiplier:  1,
 	}
 }

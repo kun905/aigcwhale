@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -92,6 +93,14 @@ type OpenAIWSStateStore interface {
 	// HasAnySessionInvalidEncryptedContent 是热路径快速探测：全局无记录时
 	// 调用方可跳过会话哈希计算与摘要匹配。
 	HasAnySessionInvalidEncryptedContent() bool
+}
+
+// openAIWSResponseAccountStrictReader is used only by text/image routing
+// boundary checks. Ordinary scheduler lookups keep their historical
+// best-effort behavior, while boundary validation must distinguish a real
+// cache miss from an infrastructure failure so callers can fail closed.
+type openAIWSResponseAccountStrictReader interface {
+	GetResponseAccountStrict(ctx context.Context, groupID int64, responseID string) (int64, error)
 }
 
 type defaultOpenAIWSStateStore struct {
@@ -236,6 +245,29 @@ func cleanupExpiredHTTPResponseOwnerBindings(bindings map[string]openAIHTTPRespo
 }
 
 func (s *defaultOpenAIWSStateStore) GetResponseAccount(ctx context.Context, groupID int64, responseID string) (int64, error) {
+	accountID, err := s.getResponseAccount(ctx, groupID, responseID, false)
+	if err != nil {
+		// Historical scheduler behavior treats cache failures as a miss so a
+		// transient Redis issue does not block ordinary request routing.
+		return 0, nil
+	}
+	return accountID, nil
+}
+
+// GetResponseAccountStrict preserves cache read failures for routing boundary
+// validation. This is intentionally separate from GetResponseAccount so the
+// existing scheduler remains best-effort while cross-pool continuation checks
+// can reject requests whose ownership cannot be established safely.
+func (s *defaultOpenAIWSStateStore) GetResponseAccountStrict(ctx context.Context, groupID int64, responseID string) (int64, error) {
+	return s.getResponseAccount(ctx, groupID, responseID, true)
+}
+
+func (s *defaultOpenAIWSStateStore) getResponseAccount(
+	ctx context.Context,
+	groupID int64,
+	responseID string,
+	strict bool,
+) (int64, error) {
 	id := normalizeOpenAIWSResponseID(responseID)
 	if id == "" {
 		return 0, nil
@@ -262,8 +294,17 @@ func (s *defaultOpenAIWSStateStore) GetResponseAccount(ctx context.Context, grou
 	cacheCtx, cancel := withOpenAIWSStateStoreRedisTimeout(ctx)
 	defer cancel()
 	accountID, err := s.cache.GetSessionAccountID(cacheCtx, groupID, cacheKey)
-	if err != nil || accountID <= 0 {
-		// 缓存读取失败不阻断主流程，按未命中降级。
+	if err != nil {
+		if errors.Is(err, ErrStickySessionNotFound) {
+			return 0, nil
+		}
+		if strict {
+			return 0, err
+		}
+		// 缓存读取失败不阻断普通调度主流程，按未命中降级。
+		return 0, nil
+	}
+	if accountID <= 0 {
 		return 0, nil
 	}
 	return accountID, nil

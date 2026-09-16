@@ -339,7 +339,10 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			normalized = litePayload
 		}
 		apiKey := getAPIKeyFromContext(c)
-		imageGenerationAllowed := GroupAllowsImageGeneration(apiKeyGroup(apiKey))
+		// WS 图片 turn 的权限与图片目标分组一致；连接的认证身份和普通
+		// 文本 turn 仍使用源 GPT 分组，避免改变租户配额/计费归属。
+		permissionGroup := OpenAIImageGenerationGroupForRequest(ctx, apiKeyGroup(apiKey))
+		imageGenerationAllowed := GroupAllowsImageGeneration(permissionGroup)
 		codexImageGenerationExplicitToolPolicy := codexImageGenerationExplicitToolPolicyAllow
 		if isCodexCLI {
 			codexImageGenerationExplicitToolPolicy = account.CodexImageGenerationExplicitToolPolicy()

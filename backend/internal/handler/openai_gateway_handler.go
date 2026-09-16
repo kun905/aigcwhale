@@ -459,6 +459,32 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		return
 	}
 	reqModel := modelResult.String()
+	// Detect explicit image generation before applying group-dependent policies.
+	// A passive image_gen namespace in ordinary Codex traffic is deliberately
+	// excluded by IsExplicitImageGenerationIntent.
+	imageIntent := service.IsExplicitImageGenerationIntent("/v1/responses", reqModel, body)
+	routingGroupID := apiKey.GroupID
+	permissionGroup := apiKey.Group
+	if imageIntent {
+		if _, routeErr := h.routeImageGenerationGroup(c); routeErr != nil {
+			reqLog.Warn("openai.responses.image_generation_group_routing_failed", zap.Error(routeErr))
+			h.errorResponse(c, http.StatusServiceUnavailable, "service_unavailable", "Image generation target group is unavailable")
+			return
+		}
+		// Authentication, quota, and usage attribution stay on the source API key;
+		// only image capability, routing, and pricing read the request-local target.
+		routingGroupID = imageGenerationRoutingGroupID(c.Request.Context(), apiKey.GroupID)
+		permissionGroup = imageGenerationPermissionGroup(c.Request.Context(), apiKey.Group)
+		if blocked := blockedImageGenerationGroupModel(
+			c.Request.Context(),
+			imageGenerationModelCandidates("", "application/json", body, reqModel),
+		); blocked != "" {
+			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalModelConfiguration)
+			middleware2.MarkIngressRejected(c, middleware2.IngressRejectModelNotAllowed)
+			middleware2.OpenAIErrorWriter(c, http.StatusNotFound, fmt.Sprintf("Model %q is not available for this group", blocked))
+			return
+		}
+	}
 	ensureCompositeTargetPlatform(c, apiKey, reqModel)
 	if !openAICompatibleTextTargetAllowed(c, apiKey, reqModel) {
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Model is not supported by this OpenAI-compatible endpoint for composite groups")
@@ -527,6 +553,27 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "previous_response_id is not available for this user")
 			return
 		}
+		if alternateGroupID := alternateImageGenerationRoutingGroupID(apiKey, imageIntent, routingGroupID); alternateGroupID != nil {
+			expectedGroupID := int64(0)
+			if routingGroupID != nil {
+				expectedGroupID = *routingGroupID
+			}
+			crossesGroup, routingErr := h.gatewayService.OpenAIHTTPContinuationCrossesRoutingGroup(
+				c.Request.Context(),
+				previousResponseID,
+				expectedGroupID,
+				*alternateGroupID,
+			)
+			if routingErr != nil {
+				reqLog.Warn("openai.previous_response_routing_group_lookup_failed", zap.Error(routingErr))
+				h.errorResponse(c, http.StatusServiceUnavailable, "service_unavailable", "Unable to validate previous_response_id routing; please retry later")
+				return
+			} else if crossesGroup {
+				reqLog.Warn("openai.request_validation_failed", zap.String("reason", "previous_response_crosses_text_image_routing_group"))
+				h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "previous_response_id cannot be continued after switching between text and image routing; start a new response")
+				return
+			}
+		}
 	}
 	service.SetOpenAIHTTPResponseOwner(c, subject.UserID, apiKey.ID)
 
@@ -541,8 +588,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	// 使用 IsExplicitImageGenerationIntent 排除被动 image_gen namespace 声明。
 	// Codex 在所有请求中被动声明 image_gen namespace，宽泛检测会导致禁了生图的
 	// 分组中所有 Codex 请求被 403（#4447），并误占生图并发槽位。
-	imageIntent := service.IsExplicitImageGenerationIntent("/v1/responses", reqModel, body)
-	if imageIntent && !service.GroupAllowsImageGeneration(apiKey.Group) {
+	if imageIntent && !service.GroupAllowsImageGeneration(permissionGroup) {
 		h.errorResponse(c, http.StatusForbidden, "permission_error", service.ImageGenerationPermissionMessage())
 		return
 	}
@@ -559,7 +605,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	}
 
 	// 解析渠道级模型映射
-	channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, reqModel)
+	channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), routingGroupID, reqModel)
 	forwardBody := openAIModelMappedBody(body, channelMapping.Mapped, channelMapping.MappedModel, h.gatewayService.ReplaceModelInBody)
 	seedOpenAIForwardImageIntentHint(c, channelMapping.Mapped, imageIntent)
 	forwardModel := openAIChannelForwardModel(channelMapping, reqModel)
@@ -638,7 +684,14 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	// D 与计费高峰因子，选号、槽位终检与全部 failover 重入共用同一门与阈值。
 	// 生图意图只影响能力路由与图片计费，不关门：混合 /v1/responses 请求的
 	// token 计费部分仍受利润门保护，独立图片/视频端点才在门外。
-	pricingCtx, pricingAt := h.gatewayService.WithOpenAIRequestPricingContext(c.Request.Context(), apiKey.GroupID)
+	// Explicit image requests are scheduled and priced against the routed image
+	// group. Ordinary Responses text requests keep the authenticated source
+	// group so their existing profit-control behavior is unchanged.
+	pricingGroupID := apiKey.GroupID
+	if imageIntent {
+		pricingGroupID = routingGroupID
+	}
+	pricingCtx, pricingAt := h.gatewayService.WithOpenAIRequestPricingContext(c.Request.Context(), pricingGroupID)
 	c.Request = c.Request.WithContext(pricingCtx)
 
 	for {
@@ -652,7 +705,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		reqLog.Debug("openai.account_selecting", zap.Int("excluded_account_count", len(failedAccountIDs)))
 		selection, scheduleDecision, err := h.gatewayService.SelectAccountWithSchedulerForCapability(
 			c.Request.Context(),
-			apiKey.GroupID,
+			routingGroupID,
 			previousResponseID,
 			sessionHash,
 			forwardModel,
@@ -679,7 +732,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "compact_not_supported", "No available accounts support /responses/compact", streamStarted)
 					return
 				}
-				cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, reqModel, reqModel, requestPlatform)
+				cls := classifyNoAccountErrorForGroupFromGin(c, h.gatewayService, routingGroupID, reqModel, reqModel, requestPlatform)
 				cls = classifySelectionFailureError(err, cls)
 				if !cls.ModelNotFound {
 					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
@@ -695,7 +748,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			return
 		}
 		if selection == nil || selection.Account == nil {
-			cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, reqModel, reqModel, requestPlatform)
+			cls := classifyNoAccountErrorForGroupFromGin(c, h.gatewayService, routingGroupID, reqModel, reqModel, requestPlatform)
 			if !cls.ModelNotFound {
 				markOpsRoutingCapacityLimited(c)
 			}
@@ -742,7 +795,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		reqLog.Debug("openai.account_selected", zap.Int64("account_id", account.ID), zap.String("account_name", account.Name))
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 
-		accountReleaseFunc, slotResult := h.acquireResponsesAccountSlot(c, apiKey.GroupID, sessionHash, selection, reqStream, &streamStarted, reqLog)
+		accountReleaseFunc, slotResult := h.acquireResponsesAccountSlot(c, routingGroupID, sessionHash, selection, reqStream, &streamStarted, reqLog)
 		if slotResult == openAISlotAcquireProfitVetoed {
 			// 利润终检否决：排除该账号重新选号，全池耗尽由下一轮选号报错；
 			// 否决次数达上限则直接终止，避免排队抢槽后才终检的延迟放大。
@@ -819,6 +872,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					APIKeyService:      h.apiKeyService,
 					QuotaPlatform:      quotaPlatform,
 					SessionID:          sessionID,
+					PricingGroup:       permissionGroup,
 					ChannelUsageFields: clientRequestedUsageFields(c, channelMapping, reqModel, res.UpstreamModel),
 					PricingAt:          pricingAt,
 					CyberBlocked:       cyberBlocked,
@@ -2390,6 +2444,22 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "model is required in first response.create payload")
 		return
 	}
+	// Resolve the optional image target as soon as the first frame proves an
+	// explicit image request. The source API key remains in context for quota,
+	// authorization, and usage attribution; only image scheduling uses the target.
+	imageIntent := service.IsExplicitImageGenerationIntent("/v1/responses", reqModel, firstMessage)
+	routingGroupID := apiKey.GroupID
+	permissionGroup := apiKey.Group
+	if imageIntent {
+		if _, routeErr := h.routeImageGenerationGroup(c); routeErr != nil {
+			reqLog.Warn("openai.responses_ws.image_generation_group_routing_failed", zap.Error(routeErr))
+			closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "image generation target group is unavailable")
+			return
+		}
+		ctx = c.Request.Context()
+		routingGroupID = imageGenerationRoutingGroupID(ctx, apiKey.GroupID)
+		permissionGroup = imageGenerationPermissionGroup(ctx, apiKey.Group)
+	}
 	// 分组级模型白名单：首帧校验客户端模型，不通过则关闭连接并标记运维原因。
 	// 必须在 ensureCompositeTargetPlatform（合成路由改写）之前执行。
 	// 与 HTTP 准入一致：帧内重复 model 键/大小写变体可能被上游按末值绑定，
@@ -2399,6 +2469,17 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		middleware2.MarkIngressRejected(c, middleware2.IngressRejectModelNotAllowed)
 		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, fmt.Sprintf("Model %q is not available for this group", blocked))
 		return
+	}
+	if imageIntent {
+		if blocked := blockedImageGenerationGroupModel(
+			ctx,
+			imageGenerationModelCandidates("", "application/json", firstMessage, reqModel),
+		); blocked != "" {
+			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalModelConfiguration)
+			middleware2.MarkIngressRejected(c, middleware2.IngressRejectModelNotAllowed)
+			closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, fmt.Sprintf("Model %q is not available for this group", blocked))
+			return
+		}
 	}
 	ensureCompositeTargetPlatform(c, apiKey, reqModel)
 	ctx = c.Request.Context()
@@ -2414,6 +2495,32 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	if previousResponseID != "" && previousResponseIDKind == service.OpenAIPreviousResponseIDKindMessageID {
 		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "previous_response_id must be a response.id (resp_*), not a message id")
 		return
+	}
+	if previousResponseID != "" {
+		if alternateGroupID := alternateImageGenerationRoutingGroupID(apiKey, imageIntent, routingGroupID); alternateGroupID != nil {
+			expectedGroupID := int64(0)
+			if routingGroupID != nil {
+				expectedGroupID = *routingGroupID
+			}
+			expectedBound, alternateBound, routingErr := h.gatewayService.OpenAIContinuationRoutingGroupBindings(
+				ctx,
+				previousResponseID,
+				expectedGroupID,
+				*alternateGroupID,
+			)
+			if routingErr != nil {
+				reqLog.Warn("openai.websocket_previous_response_routing_group_lookup_failed", zap.Error(routingErr))
+				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "previous_response_id routing is temporarily unavailable; please retry")
+				return
+			} else if expectedBound {
+				ctx = service.WithOpenAIPreviousResponseAffinityRequired(ctx)
+				c.Request = c.Request.WithContext(ctx)
+			} else if alternateBound {
+				reqLog.Warn("openai.websocket_request_validation_failed", zap.String("reason", "previous_response_crosses_text_image_routing_group"))
+				closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "previous_response_id cannot be continued after switching between text and image routing; start a new response")
+				return
+			}
+		}
 	}
 	firstMessageToolCoverage := service.AnalyzeToolCallOutputContextCoverageBytes(firstMessage)
 	previousResponseCanMove := !firstMessageToolCoverage.HasFunctionCallOutput || firstMessageToolCoverage.ContextCoversAllCallIDs
@@ -2432,8 +2539,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		return
 	}
 
-	imageIntent := service.IsExplicitImageGenerationIntent("/v1/responses", reqModel, firstMessage)
-	if imageIntent && !service.GroupAllowsImageGeneration(apiKey.Group) {
+	if imageIntent && !service.GroupAllowsImageGeneration(permissionGroup) {
 		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, service.ImageGenerationPermissionMessage())
 		return
 	}
@@ -2464,7 +2570,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	}
 
 	// 解析渠道级模型映射
-	channelMappingWS, _ := h.gatewayService.ResolveChannelMappingAndRestrict(ctx, apiKey.GroupID, reqModel)
+	channelMappingWS, _ := h.gatewayService.ResolveChannelMappingAndRestrict(ctx, routingGroupID, reqModel)
 	wsForwardModel := openAIChannelForwardModel(channelMappingWS, reqModel)
 
 	var currentUserRelease func()
@@ -2615,7 +2721,11 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	// 并按最新门复核当前账号（准入与计费同源），峰前建连保活不能让后续 turn
 	// 继续按建连时刻的谷价计费。生图意图只影响能力路由与图片计费，不关门。
 	// 建连时刻只用于选号/准入，不作为任何 turn 的计费定价时刻。
-	wsPricingCtx, _ := h.gatewayService.WithOpenAIRequestPricingContext(ctx, apiKey.GroupID)
+	wsPricingGroupID := apiKey.GroupID
+	if imageIntent {
+		wsPricingGroupID = routingGroupID
+	}
+	wsPricingCtx, _ := h.gatewayService.WithOpenAIRequestPricingContext(ctx, wsPricingGroupID)
 	ctx = wsPricingCtx
 
 	for {
@@ -2625,7 +2735,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		reqLog.Debug("openai.websocket_account_selecting", zap.Int("excluded_account_count", len(failedAccountIDs)))
 		selection, scheduleDecision, err := h.gatewayService.SelectAccountWithSchedulerForCapability(
 			ctx,
-			apiKey.GroupID,
+			routingGroupID,
 			previousResponseID,
 			sessionHash,
 			wsForwardModel,
@@ -2729,7 +2839,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		// captured by the previous failover account before credential lookup.
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 		currentAccountRelease = wrapReleaseOnDone(ctx, accountReleaseFunc)
-		if err := h.gatewayService.BindStickySessionAfterProfitAdmission(ctx, apiKey.GroupID, sessionHash, account.ID); err != nil {
+		if err := h.gatewayService.BindStickySessionAfterProfitAdmission(ctx, routingGroupID, sessionHash, account.ID); err != nil {
 			reqLog.Warn("openai.websocket_bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 		}
 
@@ -2814,6 +2924,14 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				if model == "" {
 					model = reqModel
 				}
+				turnImageIntent := service.IsExplicitImageGenerationIntent("/v1/responses", model, payload)
+				if !imageGenerationWebSocketTurnAllowed(imageIntent, turnImageIntent) {
+					return service.NewOpenAIWSClientCloseError(
+						coderws.StatusPolicyViolation,
+						"image routing mode cannot change within one websocket connection; reconnect to continue",
+						nil,
+					)
+				}
 				// 分组级模型白名单：后续 turn 同样校验客户端模型（省略 model 时
 				// 沿用会话实际生效模型，含 session.update 轮换后的模型），不通过
 				// 则关闭整条连接，与推理强度 deny 一致。实际生效模型始终参与校验；
@@ -2824,6 +2942,13 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalModelConfiguration)
 					middleware2.MarkIngressRejected(c, middleware2.IngressRejectModelNotAllowed)
 					return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, fmt.Sprintf("Model %q is not available for this group", blocked), nil)
+				}
+				if turnImageIntent {
+					if blocked := blockedImageGenerationGroupModel(ctx, candidates); blocked != "" {
+						service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalModelConfiguration)
+						middleware2.MarkIngressRejected(c, middleware2.IngressRejectModelNotAllowed)
+						return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, fmt.Sprintf("Model %q is not available for this group", blocked), nil)
+					}
 				}
 				if decision := h.checkSecurityAuditStage(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIResponses, model, payload, "subsequent_turn"); decision != nil && !decision.AllowNextStage {
 					writeSecurityAuditWSError(ctx, wsConn, decision)
@@ -2837,7 +2962,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					model = reqModel
 				}
 				setOpsRequestContext(c, model, true)
-				mapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(ctx, apiKey.GroupID, model)
+				mapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(ctx, routingGroupID, model)
 				mappedModelUnchanged := false
 				if previous := turnChannelMapping.Load(); previous != nil && previous.turn < turn {
 					mappedModelUnchanged = strings.TrimSpace(previous.mapping.MappedModel) == strings.TrimSpace(mapping.MappedModel)
@@ -2856,7 +2981,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				// 长连接跨峰谷/倍率刷新防护：每个 turn 按当前时刻重装门并复核
 				// 当前账号，越线即要求客户端重连重选（连接绑定单一上游账号，
 				// 无法中途换号）。本 turn 的准入与计费共用同一 pricingAt。
-				turnCtx, turnAt := h.gatewayService.WithOpenAITurnPricingContext(ctx, apiKey.GroupID)
+				turnCtx, turnAt := h.gatewayService.WithOpenAITurnPricingContext(ctx, wsPricingGroupID)
 				if _, vetoed, reason := h.gatewayService.ProfitControlVetoLatest(turnCtx, account); vetoed {
 					reqLog.Info("openai.websocket_turn_profit_vetoed",
 						zap.Int("turn", turn),
@@ -2919,7 +3044,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				if snapshot := turnChannelMapping.Load(); snapshot != nil && snapshot.turn == turn {
 					turnMapping = snapshot.mapping
 				} else {
-					turnMapping, _ = h.gatewayService.ResolveChannelMappingAndRestrict(ctx, apiKey.GroupID, turnRequestedModel)
+					turnMapping, _ = h.gatewayService.ResolveChannelMappingAndRestrict(ctx, routingGroupID, turnRequestedModel)
 				}
 				if turnUpstreamModel == "" {
 					turnUpstreamModel = turnRequestedModel
@@ -2980,6 +3105,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 						User:               apiKey.User,
 						Account:            account,
 						Subscription:       subscription,
+						PricingGroup:       permissionGroup,
 						InboundEndpoint:    inboundEndpoint,
 						UpstreamEndpoint:   upstreamEndpoint,
 						UserAgent:          userAgent,

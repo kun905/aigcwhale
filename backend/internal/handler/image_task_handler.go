@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -66,10 +67,6 @@ func (h *AsyncImageHandler) Submit(c *gin.Context) {
 		imageTaskJSONError(c, http.StatusNotFound, "not_found_error", "Images API is not supported for this platform")
 		return
 	}
-	if !service.GroupAllowsImageGeneration(apiKey.Group) {
-		imageTaskJSONError(c, http.StatusForbidden, "permission_error", service.ImageGenerationPermissionMessage())
-		return
-	}
 	if h == nil || h.tasks == nil || h.execute == nil {
 		imageTaskError(c, service.ErrImageTaskUnavailable)
 		return
@@ -94,6 +91,35 @@ func (h *AsyncImageHandler) Submit(c *gin.Context) {
 	}
 	if err := h.validateRequest(c, platform, body); err != nil {
 		imageTaskJSONError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	// Resolve the optional OpenAI image target before the task context is cloned.
+	// The detached worker then carries the same target marker into Images.
+	if platform == service.PlatformOpenAI && h.openAI != nil {
+		if _, routeErr := h.openAI.routeImageGenerationGroup(c); routeErr != nil {
+			imageTaskJSONError(c, http.StatusServiceUnavailable, "service_unavailable", "Image generation target group is unavailable")
+			return
+		}
+	}
+	permissionGroup := imageGenerationPermissionGroup(c.Request.Context(), apiKey.Group)
+	if platform == service.PlatformOpenAI && h.openAI != nil && h.openAI.gatewayService != nil {
+		parsed, parseErr := h.openAI.gatewayService.ParseOpenAIImagesRequest(c, body)
+		if parseErr != nil {
+			imageTaskJSONError(c, http.StatusBadRequest, "invalid_request_error", parseErr.Error())
+			return
+		}
+		if blocked := blockedImageGenerationGroupModel(
+			c.Request.Context(),
+			imageGenerationModelCandidates(c.FullPath(), c.GetHeader("Content-Type"), body, parsed.Model),
+		); blocked != "" {
+			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalModelConfiguration)
+			middleware2.MarkIngressRejected(c, middleware2.IngressRejectModelNotAllowed)
+			middleware2.OpenAIErrorWriter(c, http.StatusNotFound, fmt.Sprintf("Model %q is not available for this group", blocked))
+			return
+		}
+	}
+	if !service.GroupAllowsImageGeneration(permissionGroup) {
+		imageTaskJSONError(c, http.StatusForbidden, "permission_error", service.ImageGenerationPermissionMessage())
 		return
 	}
 	if !h.checkSecurityAuditBeforeSubmit(c, apiKey, platform, body) {

@@ -36,6 +36,15 @@ func GroupModelAllowlist() gin.HandlerFunc {
 			c.Next()
 			return
 		}
+		// 图片请求可以由 OpenAI 源分组转发到单独的图片目标分组。
+		// 这里位于目标分组路由之前，源组白名单通常只包含 gpt-* 文本模型，
+		// 不能在目标分组有机会校验和调度前把 gpt-image-* 拦掉。只对明确的
+		// 图片创建端点、且配置了有效 OpenAI 图片目标的源组放行；目标分组
+		// 的白名单与能力检查由后续图片 handler 在路由目标加载后执行。
+		if shouldDeferImageGenerationGroupAllowlist(c, apiKey) {
+			c.Next()
+			return
+		}
 		allowlist := apiKey.Group.ModelAllowlist
 		if c.Request == nil {
 			c.Next()
@@ -86,6 +95,36 @@ func GroupModelAllowlist() gin.HandlerFunc {
 		MarkIngressRejected(c, IngressRejectModelNotAllowed)
 		groupModelAllowlistErrorWriter(c)(c, http.StatusNotFound, fmt.Sprintf("Model %q is not available for this group", blocked))
 		c.Abort()
+	}
+}
+
+// shouldDeferImageGenerationGroupAllowlist reports whether the source-group
+// allowlist must be deferred to the image handler. It intentionally does not
+// match Responses or other model-bearing endpoints: those requests continue to
+// be checked against the authenticated source group before any routing logic.
+func shouldDeferImageGenerationGroupAllowlist(c *gin.Context, apiKey *service.APIKey) bool {
+	if c == nil || c.Request == nil || apiKey == nil || apiKey.Group == nil {
+		return false
+	}
+	if c.Request.Method != http.MethodPost {
+		return false
+	}
+	group := apiKey.Group
+	if group.Platform != service.PlatformOpenAI || group.ImageGenerationGroupID == nil || *group.ImageGenerationGroupID <= 0 {
+		return false
+	}
+	path := c.FullPath()
+	if path == "" && c.Request.URL != nil {
+		path = c.Request.URL.Path
+	}
+	switch path {
+	case "/v1/images/generations", "/v1/images/edits",
+		"/v1/images/generations/async", "/v1/images/edits/async",
+		"/images/generations", "/images/edits",
+		"/images/generations/async", "/images/edits/async":
+		return true
+	default:
+		return false
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
 	"github.com/stretchr/testify/require"
 )
@@ -267,4 +268,75 @@ func TestOpenAIProfitControlAfterAdmissionBindEagerWithoutGate(t *testing.T) {
 
 	require.NoError(t, svc.BindStickySessionAfterProfitAdmission(context.Background(), &groupID, sessionHash, cheapID))
 	require.Equal(t, cheapID, cache.sessionBindings[cacheKey], "无门时保持既有 eager 绑定行为")
+}
+
+// Explicit Responses image routing must use the routed target group's customer
+// multiplier for the profit gate, while the authenticated source group remains
+// in ctxkey.Group for quota and usage ownership.
+func TestProfitControl_RoutedImageUsesTargetGroupRate(t *testing.T) {
+	sourceID := int64(701)
+	targetID := int64(702)
+	source := &Group{
+		ID: sourceID, Platform: PlatformOpenAI, Status: StatusActive, Hydrated: true,
+		RateMultiplier: 9,
+	}
+	target := profitControlTestGroup(targetID, 0.25, 0)
+	target.RateMultiplier = 0.8
+
+	svc := &OpenAIGatewayService{}
+	ctx := profitControlTestCtx(source)
+	ctx = WithOpenAIImageGenerationGroup(ctx, target)
+	ctx, _ = svc.WithOpenAIRequestPricingContext(ctx, &targetID)
+
+	gate, ok := ctx.Value(openAIProfitControlGateCtxKey{}).(*openAIProfitControlGate)
+	require.True(t, ok)
+	require.NotNil(t, gate)
+	require.InDelta(t, 0.8*0.75, gate.threshold, 1e-12)
+}
+
+type routedImageProfitRateRepo struct {
+	UserGroupRateRepository
+	rate     *float64
+	groupIDs []int64
+}
+
+func (r *routedImageProfitRateRepo) GetByUserAndGroup(_ context.Context, _, groupID int64) (*float64, error) {
+	r.groupIDs = append(r.groupIDs, groupID)
+	return r.rate, nil
+}
+
+func TestProfitControl_RoutedImageUsesTargetUserOverrideAndPeak(t *testing.T) {
+	sourceID := int64(711)
+	targetID := int64(712)
+	source := &Group{
+		ID: sourceID, Platform: PlatformOpenAI, Status: StatusActive, Hydrated: true,
+		RateMultiplier: 9,
+	}
+	target := profitControlTestGroup(targetID, 0.25, 0)
+	target.SubscriptionType = SubscriptionTypeSubscription
+	target.RateMultiplier = 4
+	target.PeakRateEnabled = true
+	target.PeakStart = "08:00"
+	target.PeakEnd = "09:00"
+	target.PeakRateMultiplier = 2
+	pricingAt := time.Date(2026, time.January, 15, 8, 30, 0, 0, timezone.Location())
+	override := 0.6
+	rateRepo := &routedImageProfitRateRepo{rate: &override}
+	svc := &OpenAIGatewayService{
+		userGroupRateResolver: newUserGroupRateResolver(
+			rateRepo, nil, time.Minute, nil, "test.profit.image-route",
+		),
+	}
+
+	ctx := profitControlTestCtx(source)
+	ctx = context.WithValue(ctx, ctxkey.UserID, int64(42))
+	ctx = context.WithValue(ctx, openAIPricingAtCtxKey{}, pricingAt)
+	ctx = WithOpenAIImageGenerationGroup(ctx, target)
+	gate := svc.resolveOpenAIProfitControlGate(ctx, &targetID)
+
+	require.NotNil(t, gate)
+	require.Equal(t, targetID, gate.groupID)
+	require.Equal(t, pricingAt, gate.pricingAt)
+	require.InDelta(t, 0.6*2*0.75, gate.threshold, 1e-12)
+	require.Equal(t, []int64{targetID}, rateRepo.groupIDs)
 }

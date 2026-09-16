@@ -20,11 +20,17 @@ import (
 
 // OpenAIRecordUsageInput input for recording usage
 type OpenAIRecordUsageInput struct {
-	Result             *OpenAIForwardResult
-	APIKey             *APIKey
-	User               *User
-	Account            *Account
-	Subscription       *UserSubscription
+	Result       *OpenAIForwardResult
+	APIKey       *APIKey
+	User         *User
+	Account      *Account
+	Subscription *UserSubscription
+	// PricingGroup is the explicitly routed image group, when present. When it
+	// differs from APIKey.Group, the whole request uses that group's pricing
+	// context even if the upstream returns no image output; API-key ownership,
+	// quota, RPM, subscription mode, and usage-log group remain sourced from
+	// APIKey.Group.
+	PricingGroup       *Group
 	InboundEndpoint    string
 	UpstreamEndpoint   string
 	UserAgent          string // 请求的 User-Agent
@@ -150,6 +156,33 @@ func groupBillsOpenAIFastAtStandard(apiKey *APIKey, account *Account, serviceTie
 	}
 }
 
+// openAIImagePricingContext keeps a routed image request's pricing separate
+// from the API key that owns it. The target group remains authoritative for
+// the whole pricing calculation even when the upstream returns zero images;
+// subscription/quota/usage attribution still belongs to the source API key.
+type openAIImagePricingContext struct {
+	apiKey               *APIKey
+	baseMultiplier       float64
+	tokenMultiplier      float64
+	perRequestMultiplier float64
+	routed               bool
+}
+
+func apiKeyForOpenAIPricingGroup(apiKey *APIKey, group *Group) *APIKey {
+	if apiKey == nil || group == nil || group.ID <= 0 {
+		return apiKey
+	}
+	if (apiKey.GroupID != nil && *apiKey.GroupID == group.ID) ||
+		(apiKey.Group != nil && apiKey.Group.ID == group.ID) {
+		return apiKey
+	}
+	clone := *apiKey
+	groupID := group.ID
+	clone.GroupID = &groupID
+	clone.Group = group
+	return &clone
+}
+
 // RecordUsage records usage and deducts balance
 func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRecordUsageInput) error {
 	if input == nil {
@@ -194,7 +227,8 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		ImageOutputTokens:    result.Usage.ImageOutputTokens,
 	}
 
-	// Get rate multiplier
+	// Get the source-group rate multiplier. This remains the authority for
+	// non-image usage and for subscription/quota ownership.
 	multiplier := 1.0
 	if s.cfg != nil {
 		multiplier = s.cfg.Default.RateMultiplier
@@ -210,6 +244,42 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	pricingAt := openAIUsagePricingAt(input)
 	multiplier, imageMultiplier := computePeakAwareMultipliers(apiKey, baseMultiplier, pricingAt)
 	videoMultiplier := resolveVideoRateMultiplier(apiKey, baseMultiplier)
+	imagePricing := openAIImagePricingContext{
+		apiKey:               apiKey,
+		baseMultiplier:       baseMultiplier,
+		tokenMultiplier:      multiplier,
+		perRequestMultiplier: imageMultiplier,
+	}
+	if input.PricingGroup != nil {
+		pricingAPIKey := apiKeyForOpenAIPricingGroup(apiKey, input.PricingGroup)
+		if pricingAPIKey != apiKey {
+			pricingBaseMultiplier := input.PricingGroup.RateMultiplier
+			if pricingAPIKey.GroupID != nil {
+				pricingBaseMultiplier = s.ResolveUserGroupRateMultiplier(
+					ctx,
+					user.ID,
+					*pricingAPIKey.GroupID,
+					input.PricingGroup.RateMultiplier,
+				)
+			}
+			pricingTokenMultiplier, pricingImageMultiplier := computePeakAwareMultipliers(pricingAPIKey, pricingBaseMultiplier, pricingAt)
+			imagePricing = openAIImagePricingContext{
+				apiKey:               pricingAPIKey,
+				baseMultiplier:       pricingBaseMultiplier,
+				tokenMultiplier:      pricingTokenMultiplier,
+				perRequestMultiplier: pricingImageMultiplier,
+				routed:               true,
+			}
+		}
+	}
+	// Resolver lookups for an explicitly routed image request must follow the
+	// target group even when the upstream returns zero images and only reports
+	// token usage. Keep this local pricing key separate from apiKey: all
+	// ownership and post-billing paths below intentionally use the source key.
+	pricingAPIKey := apiKey
+	if imagePricing.routed && imagePricing.apiKey != nil {
+		pricingAPIKey = imagePricing.apiKey
+	}
 
 	var cost *CostBreakdown
 	billingModel := forwardResultBillingModel(result.Model, result.UpstreamModel)
@@ -230,16 +300,17 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		result.UpstreamModel,
 		result.Model,
 	)
-	billingModels = s.filterCNProviderBillingModelCandidates(ctx, account, apiKey, billingModels)
+	billingModels = s.filterCNProviderBillingModelCandidates(ctx, account, pricingAPIKey, billingModels)
 	serviceTier := ""
 	if result.ServiceTier != nil {
 		serviceTier = strings.TrimSpace(*result.ServiceTier)
 	}
 	longContextBillingGate := openAILongContextBillingGate(billingAccount)
-	cost, err = s.calculateOpenAIRecordUsageCost(
+	cost, err = s.calculateOpenAIRecordUsageCostWithImagePricing(
 		ctx,
 		result,
 		apiKey,
+		imagePricing,
 		billingModels,
 		multiplier,
 		imageMultiplier,
@@ -277,16 +348,16 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		result.ImageCount > 0 || result.VideoCount > 0 || result.WebSearchCalls > 0 ||
 			result.AudioUsage != nil || result.SearchCount > 0,
 	); responseModel != "" && !strings.EqualFold(responseModel, baselineBillingModel) {
-		if identified, responseChannelPriced := s.hasIdentifiedOpenAIResponsePricing(ctx, responseModel, apiKey); identified {
-			responseModels := s.filterCNProviderBillingModelCandidates(ctx, account, apiKey, usageBillingModelCandidates(responseModel))
-			responseCost, responseErr := s.calculateOpenAIRecordUsageCost(
-				ctx, result, apiKey, responseModels, multiplier, imageMultiplier,
+		if identified, responseChannelPriced := s.hasIdentifiedOpenAIResponsePricing(ctx, responseModel, pricingAPIKey); identified {
+			responseModels := s.filterCNProviderBillingModelCandidates(ctx, account, pricingAPIKey, usageBillingModelCandidates(responseModel))
+			responseCost, responseErr := s.calculateOpenAIRecordUsageCostWithImagePricing(
+				ctx, result, apiKey, imagePricing, responseModels, multiplier, imageMultiplier,
 				videoMultiplier, baseMultiplier, tokens, serviceTier, longContextBillingGate, pricingAt,
 			)
 			// 基线定价源以 baselineBillingModel 为准：它正是 calculateOpenAIRecordUsageCost
 			// 内部做渠道定价判断时使用的模型，且"首候选有渠道价"必然意味着首候选就是实际
 			// 定价基准（有渠道价就一定能算出价，循环不会落到后续候选）。
-			baselineChannelPriced := s.resolveOpenAIChannelPricing(ctx, baselineBillingModel, apiKey) != nil
+			baselineChannelPriced := s.resolveOpenAIChannelPricing(ctx, baselineBillingModel, pricingAPIKey) != nil
 			if responseErr == nil && responseModelBillingAdoptable(cost, responseCost, baselineChannelPriced, responseChannelPriced) {
 				logResponseModelBillingApplied("service.openai_gateway", account, result.RequestID,
 					baselineBillingModel, responseModel, cost, responseCost)
@@ -299,11 +370,12 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	// Free Fast changes only the customer charge. Keep priority TotalCost and
 	// service_tier for upstream accounting, but evaluate ActualCost once more at
 	// the Standard tier using the same channel, peak, and long-context policy.
-	if groupBillsOpenAIFastAtStandard(apiKey, billingAccount, serviceTier) {
-		standardCost, standardErr := s.calculateOpenAIRecordUsageCost(
+	if groupBillsOpenAIFastAtStandard(pricingAPIKey, billingAccount, serviceTier) {
+		standardCost, standardErr := s.calculateOpenAIRecordUsageCostWithImagePricing(
 			ctx,
 			result,
 			apiKey,
+			imagePricing,
 			billingModels,
 			multiplier,
 			imageMultiplier,
@@ -426,7 +498,13 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	if isVideoUsage && (cost == nil || cost.BillingMode != string(BillingModeToken)) {
 		usageLog.RateMultiplier = videoMultiplier
 	} else if result.ImageCount > 0 && (cost == nil || cost.BillingMode != string(BillingModeToken)) {
-		usageLog.RateMultiplier = imageMultiplier
+		usageLog.RateMultiplier = imagePricing.perRequestMultiplier
+	} else if result.ImageCount > 0 {
+		usageLog.RateMultiplier = imagePricing.tokenMultiplier
+	} else if imagePricing.routed && cost != nil && cost.BillingMode != string(BillingModeToken) {
+		usageLog.RateMultiplier = imagePricing.baseMultiplier
+	} else if imagePricing.routed {
+		usageLog.RateMultiplier = imagePricing.tokenMultiplier
 	} else {
 		usageLog.RateMultiplier = multiplier
 	}
@@ -478,9 +556,13 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	}
 
 	// 计算账号统计定价费用（使用最终上游模型匹配自定义规则）
-	if apiKey.GroupID != nil {
+	accountStatsGroupID := apiKey.GroupID
+	if imagePricing.routed && imagePricing.apiKey != nil && imagePricing.apiKey.GroupID != nil {
+		accountStatsGroupID = imagePricing.apiKey.GroupID
+	}
+	if accountStatsGroupID != nil {
 		applyAccountStatsCost(ctx, usageLog, s.channelService, s.billingService,
-			account.ID, *apiKey.GroupID, result.UpstreamModel, result.Model,
+			account.ID, *accountStatsGroupID, result.UpstreamModel, result.Model,
 			tokens, cost.TotalCost, pricingAt,
 		)
 	}
@@ -569,6 +651,50 @@ func (s *OpenAIGatewayService) calculateOpenAIRecordUsageCost(
 	longContextBillingGate *bool,
 	pricingAt time.Time,
 ) (*CostBreakdown, error) {
+	return s.calculateOpenAIRecordUsageCostWithImagePricing(
+		ctx,
+		result,
+		apiKey,
+		openAIImagePricingContext{
+			apiKey:               apiKey,
+			baseMultiplier:       webSearchMultiplier,
+			tokenMultiplier:      multiplier,
+			perRequestMultiplier: imageMultiplier,
+		},
+		billingModels,
+		multiplier,
+		imageMultiplier,
+		videoMultiplier,
+		webSearchMultiplier,
+		tokens,
+		serviceTier,
+		longContextBillingGate,
+		pricingAt,
+	)
+}
+
+func (s *OpenAIGatewayService) calculateOpenAIRecordUsageCostWithImagePricing(
+	ctx context.Context,
+	result *OpenAIForwardResult,
+	apiKey *APIKey,
+	imagePricing openAIImagePricingContext,
+	billingModels []string,
+	multiplier float64,
+	imageMultiplier float64,
+	videoMultiplier float64,
+	webSearchMultiplier float64,
+	tokens UsageTokens,
+	serviceTier string,
+	longContextBillingGate *bool,
+	pricingAt time.Time,
+) (*CostBreakdown, error) {
+	if imagePricing.routed && imagePricing.apiKey != nil {
+		apiKey = imagePricing.apiKey
+		webSearchMultiplier = imagePricing.baseMultiplier
+		multiplier = imagePricing.tokenMultiplier
+		imageMultiplier = imagePricing.perRequestMultiplier
+		videoMultiplier = resolveVideoRateMultiplier(apiKey, imagePricing.baseMultiplier)
+	}
 	billingModel := firstUsageBillingModel(billingModels)
 	if result != nil && result.WebSearchCalls > 0 {
 		// Codex alpha/search 网页搜索按次计费：上游不返回 usage/token 字段，单价只取

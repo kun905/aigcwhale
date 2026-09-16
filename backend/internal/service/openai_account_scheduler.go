@@ -2249,6 +2249,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	}
 	platform = NormalizeOpenAICompatiblePlatform(platform)
 	decision := OpenAIAccountScheduleDecision{}
+	previousResponseAffinityRequired := openAIPreviousResponseAffinityRequired(ctx)
 	preserveGuardianParentBinding := preserveOpenAIGuardianParentBinding(ctx, sessionHash)
 	guardianParentAccountID := int64(0)
 	if strings.TrimSpace(previousResponseID) == "" {
@@ -2257,11 +2258,66 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	scheduler := s.getOpenAIAccountScheduler(ctx)
 	if scheduler == nil {
 		decision.Layer = openAIAccountScheduleLayerLoadBalance
+		fallbackScheduler := &defaultOpenAIAccountScheduler{service: s, stats: newOpenAIAccountRuntimeStats()}
+		if strings.TrimSpace(previousResponseID) != "" && platform == PlatformOpenAI && previousResponseAffinityRequired {
+			if s.checkChannelPricingRestriction(ctx, groupID, requestedModel) {
+				return nil, decision, fmt.Errorf("%w supporting model: %s (channel pricing restriction)", ErrNoAvailableAccounts, requestedModel)
+			}
+			selection, err := s.selectAccountByPreviousResponseIDForCapability(
+				ctx,
+				groupID,
+				previousResponseID,
+				requestedModel,
+				excludedIDs,
+				requiredCapability,
+				requireCompact,
+			)
+			if err != nil {
+				return nil, decision, err
+			}
+			if selection != nil && selection.Account != nil {
+				req := OpenAIAccountScheduleRequest{
+					GroupID:                 groupID,
+					Platform:                platform,
+					SessionHash:             sessionHash,
+					PreviousResponseID:      previousResponseID,
+					PreviousResponseCanMove: false,
+					RequestedModel:          requestedModel,
+					RequiredTransport:       requiredTransport,
+					RequiredCapability:      requiredCapability,
+					RequiredImageCapability: requiredImageCapability,
+					RequireCompact:          requireCompact,
+					ExcludedIDs:             excludedIDs,
+					RequirePrivacySet:       s.openAIGroupRequiresPrivacySet(ctx, groupID),
+				}
+				compatible, _ := fallbackScheduler.isAccountRequestCompatibleReason(ctx, selection.Account, req)
+				hasGroupMetadata := len(selection.Account.GroupIDs) > 0 || len(selection.Account.AccountGroups) > 0
+				groupCompatible := !hasGroupMetadata || openAIStickyAccountMatchesGroup(selection.Account, groupID)
+				if hasGroupMetadata {
+					groupCompatible = s.openAIAccountMatchesSchedulingGroup(selection.Account, groupID)
+				}
+				if !groupCompatible || !compatible || !fallbackScheduler.isAccountTransportCompatible(selection.Account, requiredTransport) {
+					if selection.ReleaseFunc != nil {
+						selection.ReleaseFunc()
+					}
+					selection = nil
+				}
+			}
+			if selection != nil && selection.Account != nil {
+				decision.Layer = openAIAccountScheduleLayerPreviousResponse
+				decision.StickyPreviousHit = true
+				decision.SelectedAccountID = selection.Account.ID
+				decision.SelectedAccountType = selection.Account.Type
+				if sessionHash != "" {
+					_ = s.bindOpenAIStickySessionDuringSelection(ctx, groupID, sessionHash, selection.Account.ID)
+				}
+				return selection, decision, nil
+			}
+		}
 		if guardianParentAccountID > 0 {
 			if s.checkChannelPricingRestriction(ctx, groupID, requestedModel) {
 				return nil, decision, fmt.Errorf("%w supporting model: %s (channel pricing restriction)", ErrNoAvailableAccounts, requestedModel)
 			}
-			fallbackScheduler := &defaultOpenAIAccountScheduler{service: s, stats: newOpenAIAccountRuntimeStats()}
 			selection, _, err := fallbackScheduler.selectBySessionHash(ctx, OpenAIAccountScheduleRequest{
 				GroupID:                 groupID,
 				Platform:                platform,
@@ -2356,10 +2412,11 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 			stickyAccountID = accountID
 		}
 	}
+	schedulerPreviousResponseCanMove := previousResponseCanMove && !previousResponseAffinityRequired
 	stickyWeighted := s.isOpenAIAdvancedSchedulerStickyWeightedEnabled(ctx)
 	subscriptionPriority := s.isOpenAIAdvancedSchedulerSubscriptionPriorityEnabled(ctx)
 	stickyPreviousAccountID := int64(0)
-	if stickyWeighted && previousResponseCanMove && strings.TrimSpace(previousResponseID) != "" && platform == PlatformOpenAI {
+	if stickyWeighted && schedulerPreviousResponseCanMove && strings.TrimSpace(previousResponseID) != "" && platform == PlatformOpenAI {
 		stickyPreviousAccountID = s.ResolveAccountIDByPreviousResponseIDForScheduler(ctx, groupID, previousResponseID, requestedModel, excludedIDs, requiredCapability, requireCompact)
 	}
 
@@ -2375,7 +2432,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 		PreserveStickyBinding:   preserveGuardianParentBinding,
 		RequirePrivacySet:       s.openAIGroupRequiresPrivacySet(ctx, groupID),
 		PreviousResponseID:      previousResponseID,
-		PreviousResponseCanMove: previousResponseCanMove,
+		PreviousResponseCanMove: schedulerPreviousResponseCanMove,
 		UseUpstreamTokenCost:    useUpstreamTokenCost,
 		RequestedModel:          requestedModel,
 		RequiredTransport:       requiredTransport,
