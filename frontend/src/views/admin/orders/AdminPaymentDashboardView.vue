@@ -21,6 +21,13 @@
           <button @click="loadDashboard" :disabled="loading" class="btn btn-secondary" :title="t('common.refresh')">
             <Icon name="refresh" size="md" :class="loading ? 'animate-spin' : ''" />
           </button>
+          <span
+            v-if="PAYMENT_DASHBOARD_DISPLAY_MULTIPLIER !== 1"
+            tabindex="0"
+            :title="t('payment.admin.displayMultiplierHint', { multiplier: PAYMENT_DASHBOARD_DISPLAY_MULTIPLIER })"
+            :aria-label="t('payment.admin.displayMultiplierHint', { multiplier: PAYMENT_DASHBOARD_DISPLAY_MULTIPLIER })"
+            class="shrink-0 cursor-help select-none text-[10px] leading-none text-gray-500 opacity-50 transition-opacity hover:opacity-100 focus-visible:opacity-100 dark:text-gray-400"
+          >x{{ PAYMENT_DASHBOARD_DISPLAY_MULTIPLIER }}</span>
         </div>
       </div>
 
@@ -54,12 +61,12 @@
             <div v-else class="space-y-2">
               <div v-for="[currency, users] in sortedTopUsers(stats.top_users)" :key="currency" class="space-y-2">
                 <p class="text-xs font-semibold text-gray-500 dark:text-gray-400">{{ currency }}</p>
-                <div v-for="(user, idx) in users" :key="user.user_id" class="flex items-center justify-between rounded-lg px-3 py-2 hover:bg-gray-50 dark:hover:bg-dark-700">
-                  <div class="flex items-center gap-3">
-                    <span :class="['flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold', rankClass(idx)]">{{ idx + 1 }}</span>
-                    <span class="text-sm text-gray-700 dark:text-gray-300">{{ user.email }}</span>
+                <div v-for="(user, idx) in users" :key="user.user_id" class="flex items-center justify-between gap-3 rounded-lg px-3 py-2 hover:bg-gray-50 dark:hover:bg-dark-700">
+                  <div class="flex min-w-0 items-center gap-3">
+                    <span :class="['flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-bold', rankClass(idx)]">{{ idx + 1 }}</span>
+                    <span class="min-w-0 break-all text-sm text-gray-700 dark:text-gray-300">{{ user.email }}</span>
                   </div>
-                  <span class="text-sm font-medium text-gray-900 dark:text-white">{{ formatMoney(currency, user.amount) }}</span>
+                  <span class="shrink-0 text-sm font-medium text-gray-900 dark:text-white">{{ formatMoney(currency, user.amount) }}</span>
                 </div>
               </div>
             </div>
@@ -71,7 +78,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, onMounted } from 'vue'
+import { computed, ref, watch, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { adminPaymentAPI } from '@/api/admin/payment'
@@ -82,6 +89,7 @@ import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import Icon from '@/components/icons/Icon.vue'
 import OrderStatsCards from '@/components/admin/payment/OrderStatsCards.vue'
 import DailyRevenueChart from '@/components/admin/payment/DailyRevenueChart.vue'
+import { PAYMENT_DASHBOARD_DISPLAY_MULTIPLIER, paymentDashboardDisplay } from '@/components/admin/payment/dashboardDisplay'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -89,7 +97,9 @@ const appStore = useAppStore()
 const DAYS_OPTIONS = [7, 30, 90] as const
 const days = ref<number>(30)
 const loading = ref(false)
-const stats = ref<DashboardStats | null>(null)
+const rawStats = ref<DashboardStats | null>(null)
+const stats = computed(() => rawStats.value ? paymentDashboardDisplay(rawStats.value) : null)
+let latestRequest = 0
 
 function methodColor(type: string): string {
   const c: Record<string, string> = {
@@ -124,14 +134,18 @@ function formatMoney(currency: string, amount: number): string {
 }
 
 async function loadDashboard() {
+  const request = ++latestRequest
   loading.value = true
   try {
     const res = await adminPaymentAPI.getDashboard(days.value)
-    stats.value = res.data
+    if (request === latestRequest) rawStats.value = res.data
   } catch (err: unknown) {
-    appStore.showError(extractI18nErrorMessage(err, t, 'payment.errors', t('common.error')))
+    if (request === latestRequest) {
+      rawStats.value = null
+      appStore.showError(extractI18nErrorMessage(err, t, 'payment.errors', t('common.error')))
+    }
   } finally {
-    loading.value = false
+    if (request === latestRequest) loading.value = false
   }
 }
 
