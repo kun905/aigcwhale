@@ -52,41 +52,41 @@ function money(amount: number): string {
   return new Intl.NumberFormat(undefined, { style: 'currency', currency: 'CNY' }).format(amount)
 }
 
-describe('AdminPaymentDashboardView display multiplier', () => {
+describe('AdminPaymentDashboardView demo amounts', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     getDashboard.mockImplementation(async (days: number) => ({ data: statsForDays(days) }))
   })
 
-  it('uses the same display transform for 7, 30 and 90 days and refreshes', async () => {
+  it('renders the requested totals and corresponding breakdowns for each period and refresh', async () => {
     const wrapper = render()
     await flushPromises()
 
-    for (const [index, days] of [[1, 30], [0, 7], [2, 90]] as const) {
+    for (const [index, days, target] of [[1, 30, 10969], [0, 7, 1521], [2, 90, 32907]] as const) {
       await wrapper.findAll('button')[index].trigger('click')
       await flushPromises()
 
       expect(getDashboard).toHaveBeenLastCalledWith(days)
       const stats = wrapper.findComponent({ name: 'OrderStatsCards' }).props('stats')
-      expect(stats.total_amount.CNY).toBe(days * 50)
+      expect(stats.total_amount.CNY).toBe(target)
       expect(stats.total_count).toBe(days)
       expect(wrapper.findComponent({ name: 'DailyRevenueChart' }).props('data')[0]).toEqual({
-        date: '2026-09-17', amount: { CNY: days * 50 }, count: days,
+        date: '2026-09-17', amount: { CNY: target }, count: days,
       })
       // Payment method breakdown and ranking both render the scaled amount.
-      expect(wrapper.text().split(money(days * 50))).toHaveLength(3)
+      expect(wrapper.text().split(money(target))).toHaveLength(3)
     }
 
     await wrapper.get('button[title="common.refresh"]').trigger('click')
     await flushPromises()
-    expect(wrapper.findComponent({ name: 'OrderStatsCards' }).props('stats').total_amount.CNY).toBe(4500)
+    expect(wrapper.findComponent({ name: 'OrderStatsCards' }).props('stats').total_amount.CNY).toBe(32907)
 
     const indicator = wrapper.get('span[tabindex="0"]')
-    expect(indicator.text()).toBe('x50')
+    expect(indicator.text()).toBe('demo')
     expect(indicator.classes()).toContain('text-[10px]')
     expect(indicator.classes()).toContain('opacity-50')
-    expect(indicator.attributes('title')).toBe('payment.admin.displayMultiplierHint')
-    expect(indicator.attributes('aria-label')).toBe('payment.admin.displayMultiplierHint')
+    expect(indicator.attributes('title')).toBe('payment.admin.displayDemoHint')
+    expect(indicator.attributes('aria-label')).toBe('payment.admin.displayDemoHint')
     wrapper.unmount()
   })
 
@@ -108,7 +108,7 @@ describe('AdminPaymentDashboardView display multiplier', () => {
     resolveFirst({ data: statsForDays(30) })
     await flushPromises()
 
-    expect(wrapper.findComponent({ name: 'OrderStatsCards' }).props('stats').total_amount.CNY).toBe(4500)
+    expect(wrapper.findComponent({ name: 'OrderStatsCards' }).props('stats').total_amount.CNY).toBe(32907)
     wrapper.unmount()
   })
 

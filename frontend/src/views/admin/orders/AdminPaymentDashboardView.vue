@@ -22,12 +22,12 @@
             <Icon name="refresh" size="md" :class="loading ? 'animate-spin' : ''" />
           </button>
           <span
-            v-if="PAYMENT_DASHBOARD_DISPLAY_MULTIPLIER !== 1"
+            v-if="PAYMENT_DASHBOARD_DEMO_ENABLED"
             tabindex="0"
-            :title="t('payment.admin.displayMultiplierHint', { multiplier: PAYMENT_DASHBOARD_DISPLAY_MULTIPLIER })"
-            :aria-label="t('payment.admin.displayMultiplierHint', { multiplier: PAYMENT_DASHBOARD_DISPLAY_MULTIPLIER })"
+            :title="t('payment.admin.displayDemoHint')"
+            :aria-label="t('payment.admin.displayDemoHint')"
             class="shrink-0 cursor-help select-none text-[10px] leading-none text-gray-500 opacity-50 transition-opacity hover:opacity-100 focus-visible:opacity-100 dark:text-gray-400"
-          >x{{ PAYMENT_DASHBOARD_DISPLAY_MULTIPLIER }}</span>
+          >demo</span>
         </div>
       </div>
 
@@ -89,7 +89,7 @@ import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import Icon from '@/components/icons/Icon.vue'
 import OrderStatsCards from '@/components/admin/payment/OrderStatsCards.vue'
 import DailyRevenueChart from '@/components/admin/payment/DailyRevenueChart.vue'
-import { PAYMENT_DASHBOARD_DISPLAY_MULTIPLIER, paymentDashboardDisplay } from '@/components/admin/payment/dashboardDisplay'
+import { PAYMENT_DASHBOARD_DEMO_ENABLED, paymentDashboardDisplay } from '@/components/admin/payment/dashboardDisplay'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -98,7 +98,7 @@ const DAYS_OPTIONS = [7, 30, 90] as const
 const days = ref<number>(30)
 const loading = ref(false)
 const rawStats = ref<DashboardStats | null>(null)
-const stats = computed(() => rawStats.value ? paymentDashboardDisplay(rawStats.value) : null)
+const stats = computed(() => rawStats.value ? paymentDashboardDisplay(rawStats.value, days.value) : null)
 let latestRequest = 0
 
 function methodColor(type: string): string {

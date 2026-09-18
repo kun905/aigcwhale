@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { DashboardStats } from '@/types/payment'
-import { PAYMENT_DASHBOARD_DISPLAY_MULTIPLIER, paymentDashboardDisplay } from '../dashboardDisplay'
+import { PAYMENT_DASHBOARD_DEMO_TOTALS, paymentDashboardDisplay } from '../dashboardDisplay'
 
 function statsFactory(): DashboardStats {
   return {
@@ -26,48 +26,70 @@ function statsFactory(): DashboardStats {
   }
 }
 
-describe('payment dashboard display', () => {
-  it('scales every monetary breakdown, but not counts, dates, users or ranking order', () => {
-    const source = statsFactory()
-    const display = paymentDashboardDisplay(source)
+const cents = (amount: number) => Math.round(amount * 100)
 
-    expect(PAYMENT_DASHBOARD_DISPLAY_MULTIPLIER).toBe(50)
-    expect(display.today_amount.CNY).toBeCloseTo(3018)
-    expect(display.total_amount.CNY).toBeCloseTo(49294)
+describe('payment dashboard demo display', () => {
+  it.each([[7, 1521], [30, 10969], [90, 32907]])('reconciles the %i-day total, curve, methods and average to %i', (days, target) => {
+    const source = statsFactory()
+    const display = paymentDashboardDisplay(source, days)
+
+    expect(PAYMENT_DASHBOARD_DEMO_TOTALS[days]).toBe(target)
+    expect(display.total_amount.CNY).toBe(target)
+    expect(display.daily_series.reduce((sum, day) => sum + cents(day.amount.CNY), 0)).toBe(target * 100)
+    expect(display.payment_methods.reduce((sum, method) => sum + cents(method.amount.CNY), 0)).toBe(target * 100)
+    expect(display.today_amount.CNY).toBe(display.daily_series[1].amount.CNY)
+    expect(display.avg_amount.CNY).toBe(target / source.total_count)
     expect(display.today_count).toBe(2)
     expect(display.total_count).toBe(30)
     expect(display.daily_series.map(day => day.count)).toEqual([28, 2])
     expect(display.daily_series.map(day => day.date)).toEqual(source.daily_series.map(day => day.date))
-    expect(display.daily_series[1].amount.CNY).toBeCloseTo(3018)
-    expect(display.daily_series.reduce((sum, day) => sum + day.amount.CNY, 0)).toBeCloseTo(49294)
     expect(display.payment_methods.map(method => method.count)).toEqual([13, 17])
-    expect(display.payment_methods[0].amount.CNY).toBeCloseTo(15593)
-    expect(display.payment_methods[1].amount.CNY).toBeCloseTo(33701)
-    expect(display.top_users.CNY).toEqual([
-      { user_id: 1, email: 'first@example.test', amount: 20120 },
-      { user_id: 2, email: 'second@example.test', amount: 10311.5 },
-    ])
+    expect(display.top_users.CNY.map(({ user_id, email }) => ({ user_id, email }))).toEqual(source.top_users.CNY.map(({ user_id, email }) => ({ user_id, email })))
+    expect(display.top_users.CNY[0].amount).toBeGreaterThan(display.top_users.CNY[1].amount)
+    const rankedTotal = source.top_users.CNY.reduce((sum, user) => sum + user.amount, 0)
+    expect(display.top_users.CNY.reduce((sum, user) => sum + cents(user.amount), 0)).toBe(cents(rankedTotal / source.total_amount.CNY * target))
   })
 
-  it('recomputes the single-currency average before display rounding', () => {
-    expect(paymentDashboardDisplay(statsFactory()).avg_amount.CNY.toFixed(2)).toBe('1643.13')
-  })
-
-  it('makes the new display five times the previous 10x display', () => {
+  it('allocates rounding remainders without changing zero days or ranking order', () => {
     const source = statsFactory()
-    const previous = paymentDashboardDisplay(source, 10)
-    const current = paymentDashboardDisplay(source)
-    expect(current.total_amount.CNY).toBeCloseTo(previous.total_amount.CNY * 5)
-    expect(current.today_amount.CNY).toBeCloseTo(previous.today_amount.CNY * 5)
-    expect(current.avg_amount.CNY).toBeCloseTo(previous.avg_amount.CNY * 5)
-    expect(current.top_users.CNY[0].amount).toBeCloseTo(previous.top_users.CNY[0].amount * 5)
+    source.total_amount.CNY = 3
+    source.total_count = 3
+    source.daily_series = [0, 1, 1, 1].map((amount, index) => ({ date: `2026-09-${index + 10}`, amount: { CNY: amount }, count: amount }))
+    source.payment_methods = [1, 1, 1].map((amount, index) => ({ type: `method${index}`, amount: { CNY: amount }, count: 1 }))
+    source.top_users.CNY = [1, 1, 1].map((amount, index) => ({ user_id: index, email: `${index}@example.test`, amount }))
+
+    const display = paymentDashboardDisplay(source, 30)
+    expect(display.daily_series.map(day => day.amount.CNY)).toEqual([0, 3656.34, 3656.33, 3656.33])
+    expect(display.payment_methods.map(method => method.amount.CNY)).toEqual([3656.34, 3656.33, 3656.33])
+    expect(display.top_users.CNY.map(user => user.amount)).toEqual([3656.34, 3656.33, 3656.33])
   })
 
-  it('never modifies API data or compounds the multiplier on repeated rendering', () => {
+  it('keeps today and overlapping daily windows consistent across complete periods', () => {
+    const source = statsFactory()
+    source.today_amount = { CNY: 1 }
+    source.today_count = 1
+    const series = Array.from({ length: 90 }, (_, index) => ({
+      date: new Date(Date.UTC(2026, 5, 20 + index)).toISOString().slice(0, 10),
+      amount: { CNY: 1 }, count: 1,
+    }))
+    const displays = [7, 30, 90].map(days => paymentDashboardDisplay({
+      ...source, total_amount: { CNY: days }, total_count: days, daily_series: series.slice(-days),
+    }, days))
+    expect(displays[1].daily_series.slice(-7)).toEqual(displays[0].daily_series)
+    expect(displays[2].daily_series.slice(-30)).toEqual(displays[1].daily_series)
+    expect(displays[1].today_amount).toEqual(displays[0].today_amount)
+    expect(displays[2].today_amount).toEqual(displays[0].today_amount)
+    for (const display of displays) {
+      expect(display.daily_series.reduce((sum, day) => sum + cents(day.amount.CNY), 0)).toBe(cents(display.total_amount.CNY))
+    }
+  })
+
+  it('preserves raw API data across refreshes and range switches', () => {
     const source = statsFactory()
     const original = JSON.parse(JSON.stringify(source))
-    const first = paymentDashboardDisplay(source)
-    const second = paymentDashboardDisplay(source)
+    const first = paymentDashboardDisplay(source, 30)
+    paymentDashboardDisplay(source, 7)
+    const second = paymentDashboardDisplay(source, 30)
 
     expect(source).toEqual(original)
     expect(second).toEqual(first)
@@ -77,7 +99,7 @@ describe('payment dashboard display', () => {
     expect(first.payment_methods[0]).not.toBe(source.payment_methods[0])
   })
 
-  it('keeps currencies separate without using the overall order count for mixed-currency averages', () => {
+  it('leaves other currencies untouched and respects per-currency average counts', () => {
     const source = statsFactory()
     source.total_amount = { CNY: 15, USD: 10 }
     source.today_amount = { CNY: 10, USD: 10 }
@@ -87,29 +109,45 @@ describe('payment dashboard display', () => {
     source.payment_methods = [{ type: 'stripe', amount: { CNY: 15, USD: 10 }, count: 3 }]
     source.top_users.USD = [{ user_id: 1, email: 'first@example.test', amount: 10 }]
 
-    const display = paymentDashboardDisplay(source)
-    expect(display.total_amount).toEqual({ CNY: 750, USD: 500 })
-    expect(display.today_amount).toEqual({ CNY: 500, USD: 500 })
-    expect(display.avg_amount).toEqual({ CNY: 375, USD: 500 })
-    expect(display.daily_series[0].amount).toEqual({ CNY: 750, USD: 500 })
-    expect(display.payment_methods[0].amount).toEqual({ CNY: 750, USD: 500 })
-    expect(display.top_users.USD[0].amount).toBe(500)
+    const display = paymentDashboardDisplay(source, 30)
+    expect(display.total_amount).toEqual({ CNY: 10969, USD: 10 })
+    expect(display.today_amount.USD).toBe(10)
+    expect(display.avg_amount).toEqual({ CNY: 5484.5, USD: 10 })
+    expect(display.daily_series[0].amount).toEqual({ CNY: 10969, USD: 10 })
+    expect(display.payment_methods[0].amount).toEqual({ CNY: 10969, USD: 10 })
+    expect(display.top_users.USD).toEqual(source.top_users.USD)
   })
 
-  it('restores the exact original values when the multiplier is 1', () => {
+  it('restores all original values when demo display is disabled', () => {
     const source = statsFactory()
-    expect(paymentDashboardDisplay(source, 1)).toBe(source)
-    expect(paymentDashboardDisplay(source, 1).avg_amount.CNY).toBe(32.86)
+    expect(paymentDashboardDisplay(source, 30, false)).toBe(source)
   })
 
-  it('supports empty periods, zero totals and absent optional breakdowns', () => {
+  it.each([0, 14, 365])('leaves unsupported period %i unchanged', days => {
+    const source = statsFactory()
+    expect(paymentDashboardDisplay(source, days)).toBe(source)
+  })
+
+  it('does not fabricate revenue for empty periods or absent CNY', () => {
     const empty = {
       today_amount: {}, total_amount: { CNY: 0 }, avg_amount: { CNY: 0 },
       today_count: 0, total_count: 0,
       daily_series: null, payment_methods: null, top_users: null,
     } as unknown as DashboardStats
-    expect(paymentDashboardDisplay(empty)).toEqual({
-      ...empty, daily_series: [], payment_methods: [], top_users: {},
-    })
+    expect(paymentDashboardDisplay(empty, 7)).toBe(empty)
+    empty.total_amount = {}
+    expect(paymentDashboardDisplay(empty, 30)).toBe(empty)
+    empty.total_amount = { USD: 10 }
+    empty.total_count = 1
+    expect(paymentDashboardDisplay(empty, 90)).toBe(empty)
+  })
+
+  it('handles optional breakdowns missing from the response', () => {
+    const source = { ...statsFactory(), daily_series: null, payment_methods: null, top_users: null } as unknown as DashboardStats
+    const display = paymentDashboardDisplay(source, 30)
+    expect(display.daily_series).toEqual([])
+    expect(display.payment_methods).toEqual([])
+    expect(display.top_users).toEqual({})
+    expect(display.total_amount.CNY).toBe(10969)
   })
 })
