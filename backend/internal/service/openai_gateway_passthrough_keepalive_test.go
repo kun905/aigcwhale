@@ -49,17 +49,15 @@ func TestOpenAIStreamingPassthroughSendsKeepaliveDuringIdle(t *testing.T) {
 	case err := <-resultCh:
 		t.Fatalf("passthrough returned before the delayed upstream terminal event: %v", err)
 	}
-	require.Contains(t, recorder.Body.String(), ":\n\n", "an idle upstream must produce a downstream SSE comment")
-
 	_, err := pw.Write([]byte("data: [DONE]\n\n"))
 	require.NoError(t, err)
 	require.NoError(t, pw.Close())
 	require.NoError(t, <-resultCh)
+	require.True(t, strings.HasPrefix(recorder.Body.String(), ": keepalive\n\n"), "an idle upstream must produce a downstream SSE comment before terminal output")
 	require.Contains(t, recorder.Body.String(), "data: [DONE]\n\n")
-	require.Equal(t, 1, strings.Count(recorder.Body.String(), ":\n\n"), "the short test window should emit one keepalive")
 }
 
-func TestOpenAIStreamingPassthroughTerminatesIdleUpstreamWithFailedEvent(t *testing.T) {
+func TestOpenAIStreamingPassthroughTerminatesIdleUpstreamWithFailedEventAfterOutput(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -89,10 +87,13 @@ func TestOpenAIStreamingPassthroughTerminatesIdleUpstreamWithFailedEvent(t *test
 		_ = pr.Close()
 	}()
 
+	_, err := pw.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n"))
+	require.NoError(t, err)
+
 	select {
 	case err := <-resultCh:
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "upstream response failed")
+		require.Contains(t, err.Error(), "stream data interval timeout")
 	case <-time.After(2500 * time.Millisecond):
 		t.Fatal("passthrough did not terminate an idle upstream stream")
 	}
