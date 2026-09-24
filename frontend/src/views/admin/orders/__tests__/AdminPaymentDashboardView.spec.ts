@@ -52,7 +52,7 @@ function money(amount: number): string {
   return new Intl.NumberFormat(undefined, { style: 'currency', currency: 'CNY' }).format(amount)
 }
 
-describe('AdminPaymentDashboardView demo amounts', () => {
+describe('AdminPaymentDashboardView real amounts', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     getDashboard.mockImplementation(async (days: number) => ({ data: statsForDays(days) }))
@@ -62,31 +62,26 @@ describe('AdminPaymentDashboardView demo amounts', () => {
     const wrapper = render()
     await flushPromises()
 
-    for (const [index, days, target] of [[1, 30, 10969], [0, 7, 1521], [2, 90, 32907]] as const) {
+    for (const [index, days, target] of [[1, 30, 30], [0, 7, 7], [2, 90, 90]] as const) {
       await wrapper.findAll('button')[index].trigger('click')
       await flushPromises()
 
       expect(getDashboard).toHaveBeenLastCalledWith(days)
       const stats = wrapper.findComponent({ name: 'OrderStatsCards' }).props('stats')
+      expect(stats).toEqual(statsForDays(days))
       expect(stats.total_amount.CNY).toBe(target)
       expect(stats.total_count).toBe(days)
       expect(wrapper.findComponent({ name: 'DailyRevenueChart' }).props('data')[0]).toEqual({
         date: '2026-09-17', amount: { CNY: target }, count: days,
       })
-      // Payment method breakdown and ranking both render the scaled amount.
+      // Payment method breakdown and ranking both retain the API amount.
       expect(wrapper.text().split(money(target))).toHaveLength(3)
     }
 
     await wrapper.get('button[title="common.refresh"]').trigger('click')
     await flushPromises()
-    expect(wrapper.findComponent({ name: 'OrderStatsCards' }).props('stats').total_amount.CNY).toBe(32907)
-
-    const indicator = wrapper.get('span[tabindex="0"]')
-    expect(indicator.text()).toBe('demo')
-    expect(indicator.classes()).toContain('text-[10px]')
-    expect(indicator.classes()).toContain('opacity-50')
-    expect(indicator.attributes('title')).toBe('payment.admin.displayDemoHint')
-    expect(indicator.attributes('aria-label')).toBe('payment.admin.displayDemoHint')
+    expect(wrapper.findComponent({ name: 'OrderStatsCards' }).props('stats').total_amount.CNY).toBe(90)
+    expect(wrapper.find('span[tabindex="0"]').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -108,7 +103,7 @@ describe('AdminPaymentDashboardView demo amounts', () => {
     resolveFirst({ data: statsForDays(30) })
     await flushPromises()
 
-    expect(wrapper.findComponent({ name: 'OrderStatsCards' }).props('stats').total_amount.CNY).toBe(32907)
+    expect(wrapper.findComponent({ name: 'OrderStatsCards' }).props('stats').total_amount.CNY).toBe(90)
     wrapper.unmount()
   })
 

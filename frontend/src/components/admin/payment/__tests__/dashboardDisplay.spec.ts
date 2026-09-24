@@ -31,7 +31,7 @@ const cents = (amount: number) => Math.round(amount * 100)
 describe('payment dashboard demo display', () => {
   it.each([[7, 1521], [30, 10969], [90, 32907]])('reconciles the %i-day total, curve, methods and average to %i', (days, target) => {
     const source = statsFactory()
-    const display = paymentDashboardDisplay(source, days)
+    const display = paymentDashboardDisplay(source, days, true)
 
     expect(PAYMENT_DASHBOARD_DEMO_TOTALS[days]).toBe(target)
     expect(display.total_amount.CNY).toBe(target)
@@ -58,7 +58,7 @@ describe('payment dashboard demo display', () => {
     source.payment_methods = [1, 1, 1].map((amount, index) => ({ type: `method${index}`, amount: { CNY: amount }, count: 1 }))
     source.top_users.CNY = [1, 1, 1].map((amount, index) => ({ user_id: index, email: `${index}@example.test`, amount }))
 
-    const display = paymentDashboardDisplay(source, 30)
+    const display = paymentDashboardDisplay(source, 30, true)
     expect(display.daily_series.map(day => day.amount.CNY)).toEqual([0, 3656.34, 3656.33, 3656.33])
     expect(display.payment_methods.map(method => method.amount.CNY)).toEqual([3656.34, 3656.33, 3656.33])
     expect(display.top_users.CNY.map(user => user.amount)).toEqual([3656.34, 3656.33, 3656.33])
@@ -74,7 +74,7 @@ describe('payment dashboard demo display', () => {
     }))
     const displays = [7, 30, 90].map(days => paymentDashboardDisplay({
       ...source, total_amount: { CNY: days }, total_count: days, daily_series: series.slice(-days),
-    }, days))
+    }, days, true))
     expect(displays[1].daily_series.slice(-7)).toEqual(displays[0].daily_series)
     expect(displays[2].daily_series.slice(-30)).toEqual(displays[1].daily_series)
     expect(displays[1].today_amount).toEqual(displays[0].today_amount)
@@ -87,9 +87,9 @@ describe('payment dashboard demo display', () => {
   it('preserves raw API data across refreshes and range switches', () => {
     const source = statsFactory()
     const original = JSON.parse(JSON.stringify(source))
-    const first = paymentDashboardDisplay(source, 30)
-    paymentDashboardDisplay(source, 7)
-    const second = paymentDashboardDisplay(source, 30)
+    const first = paymentDashboardDisplay(source, 30, true)
+    paymentDashboardDisplay(source, 7, true)
+    const second = paymentDashboardDisplay(source, 30, true)
 
     expect(source).toEqual(original)
     expect(second).toEqual(first)
@@ -109,7 +109,7 @@ describe('payment dashboard demo display', () => {
     source.payment_methods = [{ type: 'stripe', amount: { CNY: 15, USD: 10 }, count: 3 }]
     source.top_users.USD = [{ user_id: 1, email: 'first@example.test', amount: 10 }]
 
-    const display = paymentDashboardDisplay(source, 30)
+    const display = paymentDashboardDisplay(source, 30, true)
     expect(display.total_amount).toEqual({ CNY: 10969, USD: 10 })
     expect(display.today_amount.USD).toBe(10)
     expect(display.avg_amount).toEqual({ CNY: 5484.5, USD: 10 })
@@ -123,9 +123,14 @@ describe('payment dashboard demo display', () => {
     expect(paymentDashboardDisplay(source, 30, false)).toBe(source)
   })
 
-  it.each([0, 14, 365])('leaves unsupported period %i unchanged', days => {
+  it.each([7, 30, 90])('uses raw API values by default for %i days', days => {
     const source = statsFactory()
     expect(paymentDashboardDisplay(source, days)).toBe(source)
+  })
+
+  it.each([0, 14, 365])('leaves unsupported period %i unchanged', days => {
+    const source = statsFactory()
+    expect(paymentDashboardDisplay(source, days, true)).toBe(source)
   })
 
   it('does not fabricate revenue for empty periods or absent CNY', () => {
@@ -134,17 +139,17 @@ describe('payment dashboard demo display', () => {
       today_count: 0, total_count: 0,
       daily_series: null, payment_methods: null, top_users: null,
     } as unknown as DashboardStats
-    expect(paymentDashboardDisplay(empty, 7)).toBe(empty)
+    expect(paymentDashboardDisplay(empty, 7, true)).toBe(empty)
     empty.total_amount = {}
-    expect(paymentDashboardDisplay(empty, 30)).toBe(empty)
+    expect(paymentDashboardDisplay(empty, 30, true)).toBe(empty)
     empty.total_amount = { USD: 10 }
     empty.total_count = 1
-    expect(paymentDashboardDisplay(empty, 90)).toBe(empty)
+    expect(paymentDashboardDisplay(empty, 90, true)).toBe(empty)
   })
 
   it('handles optional breakdowns missing from the response', () => {
     const source = { ...statsFactory(), daily_series: null, payment_methods: null, top_users: null } as unknown as DashboardStats
-    const display = paymentDashboardDisplay(source, 30)
+    const display = paymentDashboardDisplay(source, 30, true)
     expect(display.daily_series).toEqual([])
     expect(display.payment_methods).toEqual([])
     expect(display.top_users).toEqual({})
