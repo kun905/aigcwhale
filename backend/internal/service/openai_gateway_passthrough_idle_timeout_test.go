@@ -61,6 +61,24 @@ func TestOpenAIStreamingPassthroughReturnsFailoverBeforeSemanticOutput(t *testin
 	require.Empty(t, recorder.Body.String())
 }
 
+func TestOpenAIStreamingPassthroughFinishesTerminalWithoutUpstreamEOF(t *testing.T) {
+	resultCh, recorder, upstream := runPassthroughIdleTimeoutTest(t, 0, 0)
+	defer func() { _ = upstream.Close() }()
+
+	event := "event: response.completed\n" +
+		`data: {"type":"response.completed","response":{"id":"resp_terminal","usage":{"input_tokens":3,"output_tokens":2}}}` + "\n\n"
+	_, err := upstream.Write([]byte(event))
+	require.NoError(t, err)
+
+	select {
+	case err := <-resultCh:
+		require.NoError(t, err)
+		require.Equal(t, event, recorder.Body.String())
+	case <-time.After(2 * time.Second):
+		t.Fatal("passthrough waited for EOF after flushing the terminal event")
+	}
+}
+
 func TestOpenAIStreamingPassthroughWritesTerminalFailureAfterOutput(t *testing.T) {
 	resultCh, recorder, upstream := runPassthroughIdleTimeoutTest(t, 0, 1)
 	defer func() { _ = upstream.Close() }()

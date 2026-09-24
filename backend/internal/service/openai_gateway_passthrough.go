@@ -2308,6 +2308,11 @@ scanLoop:
 				responseFailedPending = false
 				failureDelivered = true
 			}
+			// Stop only after the terminal event's blank line has been flushed.
+			// Codex bare errors may still be followed by a different terminal.
+			if (sawDone || sawTerminalEvent) && line == "" && (!codexFailureTerminal || !sawBareError) {
+				break scanLoop
+			}
 		case <-intervalCh:
 			lastRead := time.Unix(0, atomic.LoadInt64(&lastReadAt))
 			if time.Since(lastRead) < streamInterval {
@@ -2339,14 +2344,6 @@ scanLoop:
 				return resultWithUsage(), fmt.Errorf("stream usage incomplete after disconnect: %s", message)
 			}
 			return resultWithUsage(), fmt.Errorf("stream data interval timeout: %s", message)
-		}
-		// Terminal 事件（response.completed / [DONE] 等）随空行完整刷出后不再等上游
-		// EOF：上游在 keep-alive/HTTP2 复用连接上可能拖延关闭连接（观测到 8~46s 不等），
-		// 空等期间只能靠 keepalive 维持，白白拉长尾延迟。usage 已在 terminal 事件中解析。
-		// Codex bare error 序列（error 后可能跟 response.failed 或翻盘的 completed）
-		// 必须继续读取，不适用提前结束。
-		if (sawDone || sawTerminalEvent) && line == "" && (!codexFailureTerminal || !sawBareError) {
-			break
 		}
 	}
 	ensureResponseFailedTerminal()
