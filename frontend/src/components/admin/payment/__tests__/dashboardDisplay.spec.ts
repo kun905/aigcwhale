@@ -123,9 +123,12 @@ describe('payment dashboard demo display', () => {
     expect(paymentDashboardDisplay(source, 30, false)).toBe(source)
   })
 
-  it.each([7, 30, 90])('uses raw API values by default for %i days', days => {
+  it.each([7, 30, 90])('uses demo totals by default for %i days without changing API data', days => {
     const source = statsFactory()
-    expect(paymentDashboardDisplay(source, days)).toBe(source)
+    const original = structuredClone(source)
+    expect(paymentDashboardDisplay(source, days).total_amount.CNY).toBe(PAYMENT_DASHBOARD_DEMO_TOTALS[days])
+    expect(source).toEqual(original)
+    expect(paymentDashboardDisplay(source, days, false)).toBe(source)
   })
 
   it.each([0, 14, 365])('leaves unsupported period %i unchanged', days => {
