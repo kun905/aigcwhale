@@ -7,6 +7,11 @@ export const PAYMENT_DASHBOARD_DEMO_TOTALS: Readonly<Record<number, number>> = {
   30: 10969,
   90: 32907,
 }
+export const PAYMENT_DASHBOARD_DEMO_AVERAGES: Readonly<Record<number, number>> = {
+  7: 76.5,
+  30: 128.8,
+  90: 219.4,
+}
 
 // Largest-remainder allocation keeps every displayed breakdown exact to the cent.
 function allocateAmounts(amounts: number[], total: number): number[] {
@@ -70,9 +75,11 @@ export function paymentDashboardDisplay(
 
   const averageAmount = { ...source.avg_amount }
   // Mixed-currency order counts are not exposed; preserve the API's per-currency basis.
-  averageAmount.CNY = Object.keys(source.total_amount).length === 1
-    ? target / source.total_count
-    : (source.avg_amount.CNY || 0) * factor
+  averageAmount.CNY = PAYMENT_DASHBOARD_DEMO_AVERAGES[days] ?? (
+    Object.keys(source.total_amount).length === 1
+      ? target / source.total_count
+      : (source.avg_amount.CNY || 0) * factor
+  )
 
   const topUsers = { ...source.top_users }
   if (topUsers.CNY?.length) {

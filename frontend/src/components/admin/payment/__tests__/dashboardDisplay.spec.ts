@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { DashboardStats } from '@/types/payment'
-import { PAYMENT_DASHBOARD_DEMO_TOTALS, paymentDashboardDisplay } from '../dashboardDisplay'
+import { PAYMENT_DASHBOARD_DEMO_AVERAGES, PAYMENT_DASHBOARD_DEMO_TOTALS, paymentDashboardDisplay } from '../dashboardDisplay'
 
 function statsFactory(): DashboardStats {
   return {
@@ -38,7 +38,7 @@ describe('payment dashboard demo display', () => {
     expect(display.daily_series.reduce((sum, day) => sum + cents(day.amount.CNY), 0)).toBe(target * 100)
     expect(display.payment_methods.reduce((sum, method) => sum + cents(method.amount.CNY), 0)).toBe(target * 100)
     expect(display.today_amount.CNY).toBe(display.daily_series[1].amount.CNY)
-    expect(display.avg_amount.CNY).toBe(target / source.total_count)
+    expect(display.avg_amount.CNY).toBe(PAYMENT_DASHBOARD_DEMO_AVERAGES[days])
     expect(display.today_count).toBe(2)
     expect(display.total_count).toBe(30)
     expect(display.daily_series.map(day => day.count)).toEqual([28, 2])
@@ -112,7 +112,7 @@ describe('payment dashboard demo display', () => {
     const display = paymentDashboardDisplay(source, 30, true)
     expect(display.total_amount).toEqual({ CNY: 10969, USD: 10 })
     expect(display.today_amount.USD).toBe(10)
-    expect(display.avg_amount).toEqual({ CNY: 5484.5, USD: 10 })
+    expect(display.avg_amount).toEqual({ CNY: PAYMENT_DASHBOARD_DEMO_AVERAGES[30], USD: 10 })
     expect(display.daily_series[0].amount).toEqual({ CNY: 10969, USD: 10 })
     expect(display.payment_methods[0].amount).toEqual({ CNY: 10969, USD: 10 })
     expect(display.top_users.USD).toEqual(source.top_users.USD)
@@ -121,6 +121,16 @@ describe('payment dashboard demo display', () => {
   it('restores all original values when demo display is disabled', () => {
     const source = statsFactory()
     expect(paymentDashboardDisplay(source, 30, false)).toBe(source)
+  })
+
+  it('keeps 30-day and 90-day demo averages visibly distinct', () => {
+    const source = statsFactory()
+    const thirtyDay = paymentDashboardDisplay(source, 30, true)
+    const ninetyDay = paymentDashboardDisplay(source, 90, true)
+
+    expect(thirtyDay.avg_amount.CNY).toBe(128.8)
+    expect(ninetyDay.avg_amount.CNY).toBe(219.4)
+    expect(ninetyDay.avg_amount.CNY).toBeGreaterThan(thirtyDay.avg_amount.CNY * 1.5)
   })
 
   it.each([7, 30, 90])('uses demo totals by default for %i days without changing API data', days => {
