@@ -600,6 +600,7 @@ export default {
       dashboardTitle: 'Payment Dashboard',
       dashboardDesc: 'Recharge order analytics and insights',
       daySuffix: 'd',
+      displayDemoHint: 'Demo amounts normalized for the selected period. Actual payments, balances and records are unchanged.',
       paymentConfigTitle: 'Payment Config',
       paymentConfigDesc: 'Configure payment providers and settings',
       plansPageTitle: 'Subscription Plans',

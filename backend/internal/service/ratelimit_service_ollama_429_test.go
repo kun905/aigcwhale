@@ -132,7 +132,22 @@ func (r *ollama429Repo) bump(acct *Account) {
 func (r *ollama429Repo) GetByID(_ context.Context, id int64) (*Account, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.accounts[id], nil
+	account := r.accounts[id]
+	if account == nil {
+		return nil, nil
+	}
+	clone := *account
+	clone.Credentials = mergeMap(nil, account.Credentials)
+	clone.Extra = mergeMap(nil, account.Extra)
+	clone.RateLimitedAt = cloneTimePtr(account.RateLimitedAt)
+	clone.RateLimitResetAt = cloneTimePtr(account.RateLimitResetAt)
+	clone.OverloadUntil = cloneTimePtr(account.OverloadUntil)
+	clone.LastUsedAt = cloneTimePtr(account.LastUsedAt)
+	clone.ExpiresAt = cloneTimePtr(account.ExpiresAt)
+	clone.TempUnschedulableUntil = cloneTimePtr(account.TempUnschedulableUntil)
+	clone.SessionWindowStart = cloneTimePtr(account.SessionWindowStart)
+	clone.SessionWindowEnd = cloneTimePtr(account.SessionWindowEnd)
+	return &clone, nil
 }
 
 func (r *ollama429Repo) currentReset(id int64) *time.Time {
@@ -395,7 +410,7 @@ func TestOllamaProbeCallback_StaleLongDoesNotOverrideNewShort(t *testing.T) {
 	require.Equal(t, 1, scheduler.count())
 
 	// An admin / newer policy re-arms the account to a fresh SHORT cooldown.
-	newShort := time.Now().Add(5 * time.Second)
+	newShort := time.Now().Add(30 * time.Second)
 	repo.mutate(acct.ID, func(a *Account) { a.RateLimitResetAt = ollama429TimePtr(newShort) })
 
 	// The old async result reports a long 7d reset; it must not override.
