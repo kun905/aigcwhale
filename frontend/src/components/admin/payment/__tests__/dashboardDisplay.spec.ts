@@ -133,10 +133,10 @@ describe('payment dashboard demo display', () => {
     expect(ninetyDay.avg_amount.CNY).toBeGreaterThan(thirtyDay.avg_amount.CNY * 1.5)
   })
 
-  it.each([7, 30, 90])('uses demo totals by default for %i days without changing API data', days => {
+  it.each([7, 30, 90])('returns unmodified API statistics by default for %i days', days => {
     const source = statsFactory()
     const original = structuredClone(source)
-    expect(paymentDashboardDisplay(source, days).total_amount.CNY).toBe(PAYMENT_DASHBOARD_DEMO_TOTALS[days])
+    expect(paymentDashboardDisplay(source, days)).toBe(source)
     expect(source).toEqual(original)
     expect(paymentDashboardDisplay(source, days, false)).toBe(source)
   })

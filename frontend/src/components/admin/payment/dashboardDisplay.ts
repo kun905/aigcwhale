@@ -1,7 +1,7 @@
 import type { CurrencyAmounts, DailyPaymentStats, DashboardStats } from '@/types/payment'
 
 // Set to false to restore API values and hide the demo indicator.
-export const PAYMENT_DASHBOARD_DEMO_ENABLED: boolean = true
+export const PAYMENT_DASHBOARD_DEMO_ENABLED: boolean = false
 export const PAYMENT_DASHBOARD_DEMO_TOTALS: Readonly<Record<number, number>> = {
   7: 1521,
   30: 10969,
